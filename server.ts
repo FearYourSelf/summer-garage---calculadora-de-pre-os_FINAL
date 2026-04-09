@@ -33,7 +33,13 @@ app.use(cookieParser());
 // --- Discord OAuth Config ---
 const CLIENT_ID = process.env.DISCORD_CLIENT_ID;
 const CLIENT_SECRET = process.env.DISCORD_CLIENT_SECRET;
-const APP_URL = process.env.APP_URL || `http://localhost:${PORT}`;
+let APP_URL = process.env.APP_URL || `http://localhost:${PORT}`;
+
+// Remove trailing slash if present to avoid double slashes in redirect_uri
+if (APP_URL.endsWith('/')) {
+  APP_URL = APP_URL.slice(0, -1);
+}
+
 const REDIRECT_URI = `${APP_URL}/auth/callback`;
 
 // Summer Garage Specific IDs
@@ -143,6 +149,10 @@ async function fetchLatestGoals() {
     if (!CLIENT_ID) {
       return res.status(500).json({ error: 'DISCORD_CLIENT_ID not configured' });
     }
+    
+    console.log('--- Auth Request ---');
+    console.log('Using Redirect URI:', REDIRECT_URI);
+    
     const params = new URLSearchParams({
       client_id: CLIENT_ID,
       redirect_uri: REDIRECT_URI,
