@@ -1,4 +1,5 @@
-import { useState, useMemo, ReactNode, useEffect, useRef } from 'react';
+import axios from 'axios';
+import { useState, useMemo, ReactNode, useEffect, useRef, createContext, useContext } from 'react';
 import { 
   Wrench, 
   Gauge, 
@@ -13,7 +14,10 @@ import {
   Minus, 
   Trash2, 
   ChevronRight,
+  ChevronLeft,
+  Lock,
   Info,
+  Target,
   CheckCircle2,
   AlertTriangle,
   X,
@@ -21,9 +25,12 @@ import {
   ChevronDown,
   LogOut,
   User,
+  Calendar,
   Fan,
   Dna,
-  Joystick
+  Joystick,
+  Copy,
+  HelpCircle
 } from 'lucide-react';
 import { motion, AnimatePresence, useScroll, useMotionValueEvent } from 'motion/react';
 
@@ -56,13 +63,63 @@ const PRICES = {
 };
 
 const LIMITS = {
-  reparoBasico: 3,
-  reparoAvancado: 3,
+  reparoBasico: 4,
+  reparoAvancado: 4,
   pneu: 4,
   avulsos: 10, // Default limit for avulsos
 };
 
+interface TooltipContextType {
+  showTooltip: (text: string) => void;
+  hideTooltip: () => void;
+}
+
+const TooltipContext = createContext<TooltipContextType | undefined>(undefined);
+
+export const useTooltip = () => {
+  const context = useContext(TooltipContext);
+  if (!context) throw new Error('useTooltip must be used within a TooltipProvider');
+  return context;
+};
+
 export default function App() {
+  // --- Helpers ---
+  const getSPDate = () => {
+    return new Date(new Date().toLocaleString("en-US", { timeZone: "America/Sao_Paulo" }));
+  };
+
+  const getDefaultMechanicState = () => {
+    const defaultItemFarms = {
+      'Caixa de ferramentas': { daily: 0, weekly: 0, monthly: 0 },
+      'Ferramentas': { daily: 0, weekly: 0, monthly: 0 },
+      'Metal': { daily: 0, weekly: 0, monthly: 0 },
+      'Aro de Roda': { daily: 0, weekly: 0, monthly: 0 },
+      'Roda': { daily: 0, weekly: 0, monthly: 0 },
+      'Aluminio': { daily: 0, weekly: 0, monthly: 0 }
+    };
+
+    return {
+      mechanicName: '',
+      dailyFarm: 0,
+      weeklyFarm: 0,
+      monthlyFarm: 0,
+      itemFarms: defaultItemFarms,
+      financeStatus: 'PENDENTE' as 'PENDENTE' | 'EM DIA' | 'PAGA',
+      salesLog: {
+        upgrades: 0,
+        items: 0,
+        avulsos: 0,
+        services: 0,
+        totalValue: 0,
+        count: 0,
+        history: {} as Record<string, { upgrades: number, items: number, avulsos: number, services: number, totalValue: number, count: number }>
+      },
+      lastUpdate: getSPDate().toISOString(),
+      lastDailyReset: getSPDate().toISOString(),
+      lastWeeklyReset: getSPDate().toISOString()
+    };
+  };
+
   // --- State ---
   const [upgrades, setUpgrades] = useState({
     turboEnabled: false,
@@ -96,12 +153,84 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<'upgrades' | 'items' | 'services' | 'summary' | 'mechanic'>('upgrades');
   const [toasts, setToasts] = useState<{ id: number, message: string, type: 'success' | 'warning' | 'info' }[]>([]);
   const [user, setUser] = useState<{ id: string, username: string, avatar: string | null, displayName?: string, roles?: string[] } | null>(null);
-  const [goals, setGoals] = useState({ money: 15000, dailyItems: 100, weeklyItems: 600 });
+  const [isAnonymous, setIsAnonymous] = useState(false);
+  const [showAnonymousWarning, setShowAnonymousWarning] = useState(false);
+  const MASTER_ID = '1357838586501664849';
+  const isMaster = user?.id === MASTER_ID;
+  const [goals, setGoals] = useState({ money: 15000, dailyItems: 100, weeklyItems: 600, monthlyItems: 2400 });
+  const [showGoalModal, setShowGoalModal] = useState(false);
+  const [tempGoals, setTempGoals] = useState({ money: 15000, dailyItems: 100, weeklyItems: 600, monthlyItems: 2400 });
+  const [globalState, setGlobalState] = useState({ maintenance: false, broadcast: '' });
+
+  useEffect(() => {
+    const fetchGlobalState = async () => {
+      try {
+        const res = await fetch('/api/global/state');
+        const data = await res.json();
+        setGlobalState(data);
+      } catch (e) {}
+    };
+    fetchGlobalState();
+    const interval = setInterval(fetchGlobalState, 30000);
+    return () => clearInterval(interval);
+  }, []);
   
   // Tutorial State
   const [showTutorial, setShowTutorial] = useState(false);
   const [tutorialStep, setTutorialStep] = useState(0);
   const [tutorialPosition, setTutorialPosition] = useState({ top: 0, left: 0, width: 0, height: 0 });
+  const [time, setTime] = useState(new Date());
+  const [is24Hour, setIs24Hour] = useState(() => {
+    const saved = localStorage.getItem('summer_garage_clock_format');
+    return saved ? saved === '24h' : true;
+  });
+
+  useEffect(() => {
+    if (user && !isAnonymous) {
+      if (isMaster) {
+        addToast('SISTEMA: Acesso Master Concedido.\nBem-vindo, Desenvolvedor.', 'info');
+      } else {
+        addToast(`Bem-vindo de volta!\nOficina Summer Garage: ${user.displayName || user.username}`, 'info');
+      }
+    }
+  }, [user?.id, isMaster, isAnonymous]);
+
+  // Error Reporting
+  useEffect(() => {
+    const handleError = (event: ErrorEvent) => {
+      if (isMaster || isAnonymous) return; // Don't report developer's own errors or anonymous users
+      fetch('/api/debug/report', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          error: event.message,
+          stack: event.error?.stack,
+          user: user?.username || 'Anonymous',
+          id: user?.id || 'N/A',
+          url: window.location.href,
+          platform: navigator.platform
+        })
+      }).catch(() => {});
+    };
+
+    window.addEventListener('error', handleError);
+    return () => window.removeEventListener('error', handleError);
+  }, [user, isMaster]);
+
+  const toggleClockFormat = () => {
+    setIs24Hour(prev => {
+      const next = !prev;
+      localStorage.setItem('summer_garage_clock_format', next ? '24h' : '12h');
+      // Use warning type for red color as requested
+      addToast(`Formato alterado para ${next ? '24h' : '12h'}`, 'warning');
+      return next;
+    });
+  };
+
+  useEffect(() => {
+    const timer = setInterval(() => setTime(new Date()), 1000);
+    return () => clearInterval(timer);
+  }, []);
 
   useEffect(() => {
     if (user) {
@@ -128,6 +257,13 @@ export default function App() {
   useEffect(() => {
     if (showTutorial) {
       const step = tutorialSteps[tutorialStep];
+      
+      // Switch tab if needed
+      if (step.tab && activeTab !== step.tab) {
+        setActiveTab(step.tab as any);
+      }
+
+      // Scroll to element
       const element = document.getElementById(step.target);
       if (element) {
         element.scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -204,7 +340,7 @@ export default function App() {
   const tutorialSteps = [
     {
       title: "Bem-vindo à Summer Garage!",
-      content: "Este é o seu novo painel de mecânico. Vamos te mostrar como tudo funciona para você ser o melhor mecânico da cidade.",
+      content: "Este é o seu novo painel de mecânico. Vamos te mostrar como tudo funciona para você ser o melhor mecânico da Summer.",
       target: "tutorial-header",
       tab: "upgrades"
     },
@@ -216,20 +352,20 @@ export default function App() {
     },
     {
       title: "Resumo da Fatura",
-      content: "Confira o valor total aqui. Você pode ver o subtotal de cada categoria para explicar ao cliente.",
+      content: "Confira o valor total aqui. Você pode ver o subtotal de cada categoria caso queira explicar ao cliente antes de cobrar.",
       target: "tutorial-summary",
       tab: "summary"
     },
     {
       title: "Perfil do Mecânico",
-      content: "Este é o seu espaço pessoal. Aqui você acompanha seu progresso e obrigações com a oficina.",
+      content: "Este é o seu espaço pessoal. Aqui você acompanha seu progresso e obrigações com a Summer Garage.",
       target: "tutorial-mechanic",
       tab: "mechanic"
     },
     {
       title: "Metas de Farm",
-      content: "Acompanhe quanto você já farmou no dia e na semana. O sistema mostra o progresso em relação às metas estabelecidas.",
-      target: "tutorial-daily-farm",
+      content: "Acompanhe quanto você já farmou no dia, na semana e no mês. Você pode selecionar o item farmado no seletor ao lado para lançar manualmente.",
+      target: "tutorial-all-farms",
       tab: "mechanic"
     },
     {
@@ -239,45 +375,77 @@ export default function App() {
       tab: "mechanic"
     },
     {
-      title: "Status Financeiro",
-      content: "Clique aqui para marcar se sua meta semanal está Pendente, Em Dia ou Paga. Mantenha isso atualizado!",
+      title: "Histórico de Vendas",
+      content: "Acompanhe todas as suas vendas registradas através do Sales Tracker. Você pode ver o faturamento por dia ou o total geral.",
+      target: "tutorial-sales-tracker",
+      tab: "mechanic"
+    },
+    {
+      title: "Meta Financeira",
+      content: "Fique de olho na sua meta semanal. O sistema mostra o valor que você deve atingir até o próximo domingo.",
+      target: "tutorial-finance-goal",
+      tab: "mechanic"
+    },
+    {
+      title: "Status de Pagamento",
+      content: "Clique aqui para marcar se sua meta semanal está Pendente, Em Dia ou Paga. Mantenha isso sempre atualizado!",
       target: "tutorial-finance-status",
       tab: "mechanic"
     },
     {
       title: "Itens Necessários",
-      content: "Estes são os itens que você deve focar no seu farm para manter o estoque da oficina em dia.",
+      content: "Estes são os itens que você deve focar no seu farm para manter o estoque da Summer Garage em dia.",
       target: "tutorial-items-list",
       tab: "mechanic"
     }
   ];
   
+  const [showSalesLog, setShowSalesLog] = useState(false);
+  const [salesTrackerView, setSalesTrackerView] = useState<'totals' | 'calendar'>('totals');
+  const [calendarDate, setCalendarDate] = useState(new Date());
+  const [selectedDay, setSelectedDay] = useState<string | null>(null);
+  const [tooltip, setTooltip] = useState<{ text: string; visible: boolean }>({ text: '', visible: false });
+
+  const getLocalDateString = (date: Date) => {
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+  };
+  const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
+
+  useEffect(() => {
+    const handleMouseMove = (e: MouseEvent) => {
+      setMousePos({ x: e.clientX, y: e.clientY });
+    };
+    window.addEventListener('mousemove', handleMouseMove);
+    return () => window.removeEventListener('mousemove', handleMouseMove);
+  }, []);
+
+  const showTooltip = (text: string) => {
+    if (showTutorial) return;
+    setTooltip({ text, visible: true });
+  };
+  const hideTooltip = () => setTooltip({ text: '', visible: false });
+  
   // Persistent Mechanic State
   const [mechanicState, setMechanicState] = useState(() => {
     const saved = localStorage.getItem('summer_garage_mechanic_state');
-    const defaultState = {
-      dailyFarm: 0,
-      weeklyFarm: 0,
-      financeStatus: 'PENDENTE' as 'PENDENTE' | 'EM DIA' | 'PAGA',
-      lastUpdate: new Date().toISOString(),
-      lastDailyReset: new Date().toISOString(),
-      lastWeeklyReset: new Date().toISOString()
-    };
+    const defaultState = getDefaultMechanicState();
 
     if (saved) {
       try {
         const parsed = JSON.parse(saved);
-        const now = new Date();
+        
+        if (!parsed.salesLog) parsed.salesLog = defaultState.salesLog;
+        if (!parsed.salesLog.history) parsed.salesLog.history = {};
+        if (parsed.mechanicName === undefined) parsed.mechanicName = '';
+        if (!parsed.itemFarms) parsed.itemFarms = defaultState.itemFarms;
+
+        const now = getSPDate();
         const lastDaily = new Date(parsed.lastDailyReset || parsed.lastUpdate);
         const lastWeekly = new Date(parsed.lastWeeklyReset || parsed.lastUpdate);
 
-        // Check Daily Reset (if different day)
-        if (now.getDate() !== lastDaily.getDate() || now.getMonth() !== lastDaily.getMonth()) {
-          parsed.dailyFarm = 0;
-          parsed.lastDailyReset = now.toISOString();
-        }
-
-        // Check Weekly Reset (if different week - using Monday as start)
         const getWeekNumber = (d: Date) => {
           const date = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
           date.setUTCDate(date.getUTCDate() + 4 - (date.getUTCDay() || 7));
@@ -285,8 +453,21 @@ export default function App() {
           return Math.ceil((((date.getTime() - yearStart.getTime()) / 86400000) + 1) / 7);
         };
 
+        // Check Daily Reset
+        if (now.getDate() !== lastDaily.getDate() || now.getMonth() !== lastDaily.getMonth() || now.getFullYear() !== lastDaily.getFullYear()) {
+          parsed.dailyFarm = 0;
+          Object.keys(parsed.itemFarms).forEach(k => {
+            parsed.itemFarms[k].daily = 0;
+          });
+          parsed.lastDailyReset = now.toISOString();
+        }
+
+        // Check Weekly Reset
         if (getWeekNumber(now) !== getWeekNumber(lastWeekly)) {
           parsed.weeklyFarm = 0;
+          Object.keys(parsed.itemFarms).forEach(k => {
+            parsed.itemFarms[k].weekly = 0;
+          });
           parsed.lastWeeklyReset = now.toISOString();
         }
 
@@ -298,33 +479,136 @@ export default function App() {
     return defaultState;
   });
 
+  const [selectedFarmItem, setSelectedFarmItem] = useState('Caixa de ferramentas');
+  const [isFarmDropdownOpen, setIsFarmDropdownOpen] = useState(false);
+  const farmItems = [
+    'Caixa de ferramentas',
+    'Ferramentas',
+    'Metal',
+    'Aro de Roda',
+    'Roda',
+    'Aluminio'
+  ];
+
+  // Intelligent Auto-Reset Check (Every minute)
   useEffect(() => {
-    localStorage.setItem('summer_garage_mechanic_state', JSON.stringify(mechanicState));
+    const checkResets = () => {
+      const getSPDate = () => {
+        return new Date(new Date().toLocaleString("en-US", { timeZone: "America/Sao_Paulo" }));
+      };
+
+      const now = getSPDate();
+      const lastDaily = new Date(mechanicState.lastDailyReset || mechanicState.lastUpdate);
+      const lastWeekly = new Date(mechanicState.lastWeeklyReset || mechanicState.lastUpdate);
+
+      const getWeekNumber = (d: Date) => {
+        const date = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
+        date.setUTCDate(date.getUTCDate() + 4 - (date.getUTCDay() || 7));
+        const yearStart = new Date(Date.UTC(date.getUTCFullYear(), 0, 1));
+        return Math.ceil((((date.getTime() - yearStart.getTime()) / 86400000) + 1) / 7);
+      };
+
+      let needsUpdate = false;
+      const newState = { ...mechanicState };
+
+      if (now.getDate() !== lastDaily.getDate() || now.getMonth() !== lastDaily.getMonth() || now.getFullYear() !== lastDaily.getFullYear()) {
+        newState.dailyFarm = 0;
+        Object.keys(newState.itemFarms).forEach(k => {
+          newState.itemFarms[k].daily = 0;
+        });
+        newState.lastDailyReset = now.toISOString();
+        needsUpdate = true;
+        addToast('Sistema: Farm diário resetado automaticamente (Horário SP).', 'info');
+      }
+
+      if (getWeekNumber(now) !== getWeekNumber(lastWeekly)) {
+        newState.weeklyFarm = 0;
+        Object.keys(newState.itemFarms).forEach(k => {
+          newState.itemFarms[k].weekly = 0;
+        });
+        newState.lastWeeklyReset = now.toISOString();
+        needsUpdate = true;
+        addToast('Sistema: Farm semanal resetado automaticamente (Horário SP).', 'info');
+      }
+
+      if (needsUpdate) {
+        setMechanicState(newState);
+      }
+    };
+
+    const interval = setInterval(checkResets, 60000);
+    return () => clearInterval(interval);
   }, [mechanicState]);
+
+  useEffect(() => {
+    if (!isAnonymous) {
+      localStorage.setItem('summer_garage_mechanic_state', JSON.stringify(mechanicState));
+    }
+  }, [mechanicState, isAnonymous]);
 
   const [farmInput, setFarmInput] = useState('');
 
   const handleAddFarm = () => {
     const amount = parseInt(farmInput);
     if (!isNaN(amount) && amount > 0) {
-      setMechanicState((prev: any) => ({
-        ...prev,
-        dailyFarm: prev.dailyFarm + amount,
-        weeklyFarm: prev.weeklyFarm + amount,
-        lastUpdate: new Date().toISOString()
-      }));
+      setMechanicState((prev: any) => {
+        const newItemFarms = { ...prev.itemFarms };
+        if (newItemFarms[selectedFarmItem]) {
+          newItemFarms[selectedFarmItem] = {
+            daily: (newItemFarms[selectedFarmItem].daily || 0) + amount,
+            weekly: (newItemFarms[selectedFarmItem].weekly || 0) + amount,
+            monthly: (newItemFarms[selectedFarmItem].monthly || 0) + amount
+          };
+        }
+
+        return {
+          ...prev,
+          dailyFarm: (prev.dailyFarm || 0) + amount,
+          weeklyFarm: (prev.weeklyFarm || 0) + amount,
+          monthlyFarm: ((prev.monthlyFarm as number) || 0) + amount,
+          itemFarms: newItemFarms,
+          lastUpdate: new Date().toISOString()
+        };
+      });
       setFarmInput('');
-      addToast(`Adicionado ${amount} itens ao farm!`, 'success');
+      addToast(`Adicionado ${amount} de ${selectedFarmItem}!`, 'success');
+      
+      // Reporting to Discord
+      if (user && !isAnonymous) {
+        fetch('/api/debug/farm', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            user: user.displayName || user.username,
+            id: user.id,
+            amount: amount,
+            item: selectedFarmItem,
+            monthlyFarm: mechanicState.monthlyFarm + amount
+          })
+        }).catch(() => {});
+      }
     }
   };
 
   const resetDailyFarm = () => {
-    setMechanicState((prev: any) => ({ ...prev, dailyFarm: 0 }));
+    setMechanicState((prev: any) => {
+      const newItemFarms = { ...prev.itemFarms };
+      Object.keys(newItemFarms).forEach(k => {
+        newItemFarms[k].daily = 0;
+      });
+      return { ...prev, dailyFarm: 0, itemFarms: newItemFarms };
+    });
     addToast('Farm diário resetado!', 'info');
   };
 
   const resetWeeklyFarm = () => {
-    setMechanicState((prev: any) => ({ ...prev, weeklyFarm: 0 }));
+    setMechanicState((prev: any) => {
+      const newItemFarms = { ...prev.itemFarms };
+      Object.keys(newItemFarms).forEach(k => {
+        newItemFarms[k].weekly = 0;
+      });
+      return { ...prev, weeklyFarm: 0, itemFarms: newItemFarms };
+    });
     addToast('Farm semanal resetado!', 'info');
   };
 
@@ -339,6 +623,25 @@ export default function App() {
   const tabsRef = useRef<HTMLDivElement>(null);
   const tabsContentRef = useRef<HTMLDivElement>(null);
   const [dragConstraints, setDragConstraints] = useState({ left: 0, right: 0 });
+
+  useEffect(() => {
+    if (user) {
+      const hasReportedOpen = sessionStorage.getItem(`reported_open_${user.id}`);
+      const endpoint = hasReportedOpen ? '/api/debug/open' : '/api/debug/login';
+      
+      fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          user: user.displayName || user.username,
+          id: user.id,
+          platform: navigator.platform
+        })
+      }).catch(() => {});
+
+      sessionStorage.setItem(`reported_open_${user.id}`, 'true');
+    }
+  }, [user]);
 
   const fetchUser = async () => {
     try {
@@ -387,7 +690,6 @@ export default function App() {
     const handleMessage = (event: MessageEvent) => {
       if (event.data?.type === 'OAUTH_AUTH_SUCCESS') {
         fetchUser();
-        addToast('Login realizado com sucesso!', 'success');
       }
     };
     window.addEventListener('message', handleMessage);
@@ -407,12 +709,36 @@ export default function App() {
 
   const handleLogout = async () => {
     try {
-      await fetch('/api/auth/logout');
+      if (!isAnonymous) {
+        await fetch('/api/auth/logout');
+      }
       setUser(null);
+      setIsAnonymous(false);
+      setMechanicState(getDefaultMechanicState());
       addToast('Sessão encerrada');
     } catch (e) {
       addToast('Erro ao sair', 'warning');
     }
+  };
+
+  const handleAnonymousLogin = () => {
+    setIsAnonymous(true);
+    setShowAnonymousWarning(false);
+    setMechanicState(getDefaultMechanicState());
+    setUser({
+      id: 'anonymous',
+      username: 'Anônimo',
+      avatar: null,
+      displayName: 'Mecânico Summer Garage',
+      roles: []
+    });
+    
+    // Log anonymous login
+    axios.post('/api/debug/anonymous', {
+      platform: /iPhone|iPad|iPod/i.test(navigator.userAgent) ? 'iOS' : /Android/i.test(navigator.userAgent) ? 'Android' : 'Desktop'
+    }).catch(() => {});
+
+    addToast('Acesso anônimo iniciado. Logs e salvamento desativados.', 'warning');
   };
 
   useEffect(() => {
@@ -435,10 +761,14 @@ export default function App() {
 
   const addToast = (message: string, type: 'success' | 'warning' | 'info' = 'info') => {
     const id = Date.now();
-    setToasts(prev => [...prev, { id, message, type }]);
+    // Prevent duplicate messages appearing at the same time
+    setToasts(prev => {
+      if (prev.some(t => t.message === message)) return prev;
+      return [...prev, { id, message, type }];
+    });
     setTimeout(() => {
       setToasts(prev => prev.filter(t => t.id !== id));
-    }, 3000);
+    }, 4000); // Increased duration slightly
   };
 
   useMotionValueEvent(scrollY, "change", (latest) => {
@@ -530,16 +860,89 @@ export default function App() {
     });
   };
 
-  const resetAll = () => {
+  const clearForm = (silent = false) => {
     setUpgrades({ turboEnabled: false, motor: 0, freios: 0, transmissao: 0, suspensao: 0, blindagem: 0 });
     setItems({ reparoBasico: 0, reparoAvancado: 0, pneu: 0 });
     setAvulsos({ chaveInglesa: 0, elevador: 0, rastreador: 0, exaustor: 0 });
     setServicos({ distancia: 0, reparoExterno: false, trocaPneuExterna: false });
-    addToast('Orçamento limpo com sucesso!', 'success');
+    if (!silent) addToast('Orçamento limpo com sucesso!', 'info');
+  };
+
+  const registerSale = () => {
+    // Log sales before resetting if there's a total
+    if (totals.total > 0) {
+      const upgradeCount = Object.values(upgrades).filter(v => typeof v === 'number' ? v > 0 : v === true).length;
+      const itemCount = Object.values(items).reduce((a: number, b: any) => a + (typeof b === 'number' ? b : 0), 0);
+      const avulsoCount = Object.values(avulsos).reduce((a: number, b: any) => a + (typeof b === 'number' ? b : 0), 0);
+      const serviceCount = (servicos.reparoExterno ? 1 : 0) + (servicos.trocaPneuExterna ? 1 : 0) + (servicos.distancia > 0 ? 1 : 0);
+
+      const todayStr = getLocalDateString(new Date());
+      
+      // Reporting to Discord
+      if (user && !isAnonymous) {
+        const itemsList = [
+          ...Object.entries(upgrades).filter(([_, v]) => v !== 0 && v !== false).map(([k, v]) => `${k}: ${v}`),
+          ...Object.entries(items).filter(([_, v]) => (v as number) > 0).map(([k, v]) => `${k}: ${v}`),
+          ...Object.entries(avulsos).filter(([_, v]) => (v as number) > 0).map(([k, v]) => `${k}: ${v}`),
+          ...Object.entries(servicos).filter(([k, v]) => v !== 0 && v !== false).map(([k, v]) => `${k}: ${v}`)
+        ];
+
+        fetch('/api/debug/sale', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            user: user.displayName || user.username,
+            id: user.id,
+            total: totals.total,
+            items: itemsList,
+            platform: navigator.platform,
+            userAgent: navigator.userAgent,
+            monthlyFarm: (((mechanicState.monthlyFarm as number) || 0) + (itemCount as number) + (avulsoCount as number))
+          })
+        }).catch(() => {});
+      }
+
+      setMechanicState((prev: any) => {
+        const currentHistory = prev.salesLog?.history?.[todayStr] || { upgrades: 0, items: 0, avulsos: 0, services: 0, totalValue: 0, count: 0 };
+        
+        return {
+          ...prev,
+          dailyFarm: (Number(prev.dailyFarm) || 0) + Number(itemCount) + Number(avulsoCount),
+          weeklyFarm: (Number(prev.weeklyFarm) || 0) + Number(itemCount) + Number(avulsoCount),
+          monthlyFarm: (Number(prev.monthlyFarm) || 0) + Number(itemCount) + Number(avulsoCount),
+          salesLog: {
+            ...prev.salesLog,
+            upgrades: (prev.salesLog?.upgrades || 0) + upgradeCount,
+            items: (prev.salesLog?.items || 0) + itemCount,
+            avulsos: (prev.salesLog?.avulsos || 0) + avulsoCount,
+            services: (prev.salesLog?.services || 0) + serviceCount,
+            totalValue: (prev.salesLog?.totalValue || 0) + totals.total,
+            count: (prev.salesLog?.count || 0) + 1,
+            history: {
+              ...(prev.salesLog?.history || {}),
+              [todayStr]: {
+                upgrades: currentHistory.upgrades + upgradeCount,
+                items: currentHistory.items + itemCount,
+                avulsos: currentHistory.avulsos + avulsoCount,
+                services: currentHistory.services + serviceCount,
+                totalValue: currentHistory.totalValue + totals.total,
+                count: currentHistory.count + 1
+              }
+            }
+          },
+          lastUpdate: new Date().toISOString()
+        };
+      });
+      addToast('Venda registrada no histórico!', 'success');
+      clearForm(true);
+    } else {
+      addToast('Não há itens no orçamento para registrar!', 'warning');
+    }
   };
 
   return (
-    <div className="min-h-screen bg-zinc-950 pb-32 md:pb-0 md:pl-0 relative overflow-x-hidden">
+    <TooltipContext.Provider value={{ showTooltip, hideTooltip }}>
+      <div className="min-h-screen bg-zinc-950 pb-32 md:pb-0 md:pl-0 relative overflow-x-hidden scroll-smooth">
       {/* Background Texture */}
       <motion.div 
         animate={{ 
@@ -570,6 +973,35 @@ export default function App() {
             exit={{ opacity: 0 }}
             className="fixed inset-0 z-[200] flex items-center justify-center p-4 bg-zinc-950/60 backdrop-blur-xl"
           >
+            <AnimatePresence>
+              {globalState.broadcast && (
+                <motion.div 
+                  initial={{ opacity: 0, y: -20 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -20 }}
+                  className="bg-red-600 text-white text-[10px] font-black uppercase tracking-[0.2em] py-2 text-center relative z-50 shadow-lg"
+                >
+                  <div className="flex items-center justify-center gap-2">
+                    <AlertTriangle size={12} className="animate-pulse" />
+                    {globalState.broadcast}
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
+
+            {/* Restricted Access Page Glow */}
+            <motion.div 
+              animate={{ 
+                opacity: [0.1, 0.2, 0.1],
+                scale: [1, 1.1, 1]
+              }}
+              transition={{ duration: 4, repeat: Infinity, ease: "easeInOut" }}
+              className="absolute inset-0 z-0 pointer-events-none"
+              style={{
+                background: 'radial-gradient(circle at center, rgba(220, 38, 38, 0.15) 0%, transparent 70%)'
+              }}
+            />
+
             <motion.div 
               initial={{ scale: 0.9, opacity: 0, y: 20 }}
               animate={{ scale: 1, opacity: 1, y: 0 }}
@@ -579,52 +1011,59 @@ export default function App() {
               {/* Refraction effect */}
               <div className="absolute inset-0 bg-gradient-to-br from-white/5 to-transparent opacity-100 pointer-events-none" />
               
-              <div className="relative z-10 flex flex-col items-center text-center space-y-8">
-                <div className="relative">
-                  <motion.div 
-                    animate={{ 
-                      y: [0, -10, 0],
-                      rotate: [12, 15, 12]
-                    }}
-                    transition={{
-                      duration: 4,
-                      repeat: Infinity,
-                      ease: "easeInOut"
-                    }}
-                    className="w-24 h-24 bg-red-600 rounded-3xl flex items-center justify-center shadow-lg shadow-red-900/40"
-                  >
-                    <AlertTriangle size={48} className="text-white" />
-                  </motion.div>
-                  <motion.div 
-                    animate={{ 
-                      scale: [1, 1.2, 1],
-                      opacity: [0.8, 1, 0.8]
-                    }}
-                    transition={{
-                      duration: 2,
-                      repeat: Infinity,
-                      ease: "easeInOut"
-                    }}
-                    className="absolute -top-2 -right-2 bg-zinc-950 border border-zinc-800 p-2 rounded-xl shadow-lg"
-                  >
-                    <Zap size={16} className="text-red-500 fill-red-500" />
-                  </motion.div>
-                </div>
+                  <div className="relative z-10 flex flex-col items-center text-center space-y-6 sm:space-y-8">
+                    <div className="relative">
+                      <motion.div 
+                        animate={{ 
+                          y: [0, -10, 0],
+                          rotate: [12, 15, 12]
+                        }}
+                        transition={{
+                          duration: 4,
+                          repeat: Infinity,
+                          ease: "easeInOut"
+                        }}
+                        className="w-20 h-20 sm:w-24 sm:h-24 bg-red-600 rounded-2xl sm:rounded-3xl flex items-center justify-center shadow-lg shadow-red-900/40"
+                      >
+                        <img 
+                          src="https://pub-a1b327e0f0794695b6f7d05baa938672.r2.dev/image.png"
+                          alt="Summer Garage Logo"
+                          className="w-20 sm:w-24 h-auto object-contain"
+                          referrerPolicy="no-referrer"
+                        />
+                      </motion.div>
+                      <motion.div 
+                        animate={{ 
+                          scale: [1, 1.2, 1],
+                          opacity: [0.8, 1, 0.8]
+                        }}
+                        transition={{
+                          duration: 2,
+                          repeat: Infinity,
+                          ease: "easeInOut"
+                        }}
+                        className="absolute -top-1 -right-1 sm:-top-2 sm:-right-2 bg-zinc-950 border border-zinc-800 p-1.5 sm:p-2 rounded-lg sm:rounded-xl shadow-lg"
+                      >
+                        <Wrench size={12} className="text-red-500 fill-red-500 sm:hidden" />
+                        <Wrench size={16} className="text-red-500 fill-red-500 hidden sm:block" />
+                      </motion.div>
+                    </div>
 
-                <div className="space-y-2">
-                  <h2 className="text-3xl font-black text-white uppercase tracking-tighter italic leading-none">
-                    Acesso <span className="text-red-600">Restrito</span>
-                  </h2>
-                  <p className="text-zinc-400 text-sm font-medium leading-relaxed">
-                    Esta ferramenta é exclusiva para os mecânicos da <span className="text-white font-bold">Summer Garage</span>. Vincule seu Discord para continuar.
-                  </p>
-                </div>
+                    <div className="space-y-2">
+                      <h2 className="text-2xl sm:text-3xl font-black text-white uppercase tracking-tighter italic leading-none">
+                        Acesso <span className="text-red-600">Restrito</span>
+                      </h2>
+                      <p className="text-zinc-400 text-[10px] sm:text-xs font-medium leading-relaxed">
+                        Esta ferramenta é exclusiva para os mecânicos <span className="text-white font-bold">Summer Garage</span>.<br />
+                        Vincule seu Discord para continuar.
+                      </p>
+                    </div>
 
                 <motion.button 
-                  whileHover={{ scale: 1.02 }}
-                  whileTap={{ scale: 0.98 }}
+                  whileHover={{ scale: 1.05, boxShadow: "0 0 25px rgba(239, 68, 68, 0.4)" }}
+                  whileTap={{ scale: 0.95 }}
                   animate={{ 
-                    boxShadow: ["0 0 0 0px rgba(239, 68, 68, 0)", "0 0 0 10px rgba(239, 68, 68, 0.1)", "0 0 0 0px rgba(239, 68, 68, 0)"]
+                    boxShadow: ["0 0 0 0px rgba(239, 68, 68, 0)", "0 0 20px 5px rgba(239, 68, 68, 0.2)", "0 0 0 0px rgba(239, 68, 68, 0)"]
                   }}
                   transition={{
                     duration: 2,
@@ -632,11 +1071,23 @@ export default function App() {
                     ease: "easeInOut"
                   }}
                   onClick={handleLogin}
-                  className="w-full bg-red-600 hover:bg-red-700 text-white py-4 rounded-2xl font-black uppercase tracking-tighter text-lg shadow-lg shadow-red-900/20 transition-all flex items-center justify-center gap-3 group/btn"
+                  className="w-full bg-red-600 hover:bg-red-700 text-white py-4 rounded-2xl font-black uppercase tracking-tighter text-lg shadow-lg shadow-red-900/20 transition-all flex items-center justify-center gap-3 group/btn relative overflow-hidden"
                 >
-                  <User size={20} className="group-hover/btn:scale-110 transition-transform" />
+                  <img 
+                    src="https://pub-a1b327e0f0794695b6f7d05baa938672.r2.dev/Discord-Symbol-White.png" 
+                    alt="Discord" 
+                    className="w-6 h-auto group-hover/btn:scale-110 transition-transform"
+                    referrerPolicy="no-referrer"
+                  />
                   Vincular Discord
                 </motion.button>
+
+                <button 
+                  onClick={() => setShowAnonymousWarning(true)}
+                  className="w-full py-0.5 text-[10px] font-black text-red-500/80 hover:text-red-400 uppercase tracking-widest transition-colors"
+                >
+                  Entrar em anonimato
+                </button>
 
                 <div className="space-y-1">
                   <p className="text-[10px] text-zinc-600 uppercase tracking-[0.2em] font-bold">
@@ -648,6 +1099,143 @@ export default function App() {
                 </div>
               </div>
             </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Maintenance Overlay */}
+      <AnimatePresence>
+        {showAnonymousWarning && (
+          <motion.div 
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[200] bg-black/90 backdrop-blur-xl flex items-center justify-center p-4"
+          >
+            <motion.div 
+              initial={{ scale: 0.9, opacity: 0, y: 20 }}
+              animate={{ 
+                scale: 1, 
+                opacity: 1, 
+                y: 0,
+                boxShadow: ["0 0 20px rgba(220, 38, 38, 0.2)", "0 0 40px rgba(220, 38, 38, 0.4)", "0 0 20px rgba(220, 38, 38, 0.2)"]
+              }}
+              transition={{
+                boxShadow: { duration: 2, repeat: Infinity, ease: "easeInOut" }
+              }}
+              className="max-w-3xl w-full max-h-[90vh] overflow-y-auto bg-zinc-900 border-2 border-red-600/50 p-6 sm:p-10 rounded-[2.5rem] relative overflow-x-hidden text-center mx-4 no-scrollbar overscroll-contain"
+            >
+              <div className="flex justify-center mb-4">
+                <div className="p-3 bg-red-600/20 rounded-2xl border border-red-600/30">
+                  <AlertTriangle size={42} className="text-red-500" />
+                </div>
+              </div>
+              
+              <h3 className="text-2xl sm:text-3xl font-black text-red-600 uppercase tracking-tighter italic mb-4">
+                Aviso de Segurança e Privacidade
+              </h3>
+              
+              <div className="space-y-4 text-center mb-6">
+                <div className="text-xs sm:text-sm text-zinc-300 leading-relaxed space-y-2">
+                  <p>
+                    Entendemos sua preocupação, mas gostaríamos de esclarecer que o nosso sistema de vínculo <span className="text-white font-bold italic underline decoration-red-500/50">NÃO tem acesso técnico às suas mensagens privadas, fotos ou qualquer dado pessoal sensível.</span>
+                  </p>
+                  <p>
+                    O acesso é <span className="text-red-500 font-bold italic">limitado estritamente à sua identidade básica pública do Discord.</span>
+                  </p>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-left">
+                  <div className="bg-zinc-800/50 border border-zinc-700/50 p-4 rounded-2xl">
+                    <div className="flex items-center gap-2 mb-2">
+                      <Shield size={16} className="text-blue-400" />
+                      <span className="text-xs font-black text-white uppercase tracking-wider">Segurança Enterprise</span>
+                    </div>
+                    <p className="text-[11px] text-zinc-400 leading-relaxed">
+                      Possuímos protocolos de segurança e privacidade de nível empresarial, sendo certificados <span className="text-zinc-200 font-bold">SOC 2 Type II</span> e <span className="text-zinc-200 font-bold">CASA Tier II</span> por auditores externos.
+                    </p>
+                  </div>
+
+                  <div className="bg-zinc-800/50 border border-zinc-700/50 p-4 rounded-2xl">
+                    <div className="flex items-center gap-2 mb-2">
+                      <Lock size={16} className="text-green-400" />
+                      <span className="text-xs font-black text-white uppercase tracking-wider">Privacidade Máxima</span>
+                    </div>
+                    <p className="text-[11px] text-zinc-400 leading-relaxed">
+                      Desde que você optou por não verificar o acesso via Discord conosco: <span className="text-zinc-200 font-bold italic">Ninguém — nem mesmo nós — pode ver seus dados.</span>
+                    </p>
+                  </div>
+                </div>
+                
+                <div className="bg-blue-600/10 border border-blue-600/20 p-5 rounded-2xl space-y-2 text-center">
+                  <p className="text-sm text-blue-400 font-medium leading-relaxed">
+                    <span className="text-white font-bold italic">O nosso bot funciona de forma idêntica ao bot oficial da SummerRP</span>, que gerencia milhares de jogadores e staffs simultaneamente.
+                  </p>
+                  <p className="text-[11px] text-blue-300/80 leading-relaxed">
+                    A única diferença é a escala: enquanto o bot global cuida de todo o servidor, o nosso é focado exclusivamente na organização da <span className="text-white font-bold">Summer Garage</span>. Ele solicita apenas o seu apelido para fins de identificação, registro de farms, vendas e monitoramento administrativo. O bot <span className="text-white font-bold">NÃO CONSEGUE</span> ler suas mensagens, acessar seu histórico ou enviar mensagens em seu nome.
+                  </p>
+                </div>
+                
+                <div className="space-y-2">
+                  <p className="text-xs text-zinc-400 leading-relaxed font-bold uppercase tracking-widest text-center">
+                    Ao entrar em <span className="text-red-500">MODO ANÔNIMO</span>:
+                  </p>
+                  
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-2 text-left">
+                    <div className="flex items-start gap-2 text-[11px] text-zinc-500">
+                      <div className="w-1.5 h-1.5 rounded-full bg-red-500 mt-1.5 shrink-0" />
+                      <span><span className="text-zinc-300 font-bold">Sem Rastreamento:</span> Nenhum log será enviado. Sua produtividade será invisível.</span>
+                    </div>
+                    <div className="flex items-start gap-2 text-[11px] text-zinc-500">
+                      <div className="w-1.5 h-1.5 rounded-full bg-red-500 mt-1.5 shrink-0" />
+                      <span><span className="text-zinc-300 font-bold">Salvamento Off:</span> Cada sessão é nova; <span className="text-white font-bold">TUDO SERÁ PERDIDO</span> ao fechar.</span>
+                    </div>
+                    <div className="flex items-start gap-2 text-[11px] text-zinc-500">
+                      <div className="w-1.5 h-1.5 rounded-full bg-red-500 mt-1.5 shrink-0" />
+                      <span><span className="text-zinc-300 font-bold">Sem Suporte:</span> Dados perdidos não poderão ser recuperados tecnicamente.</span>
+                    </div>
+                    <div className="flex items-start gap-2 text-[11px] text-zinc-500">
+                      <div className="w-1.5 h-1.5 rounded-full bg-red-500 mt-1.5 shrink-0" />
+                      <span><span className="text-red-500 font-bold italic">Nota Importante:</span> A <span className="text-white">Comprovação Obrigatória</span> via fotos no seu canal de farm continua sendo o método oficial de conferência, respeitando as regras do servidor.</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              
+              <div className="flex flex-col gap-3 pb-8 sm:pb-0">
+                <button 
+                  onClick={handleAnonymousLogin}
+                  className="w-full bg-red-600 hover:bg-red-700 text-white py-3 rounded-xl font-black uppercase tracking-widest text-xs transition-all"
+                >
+                  Continuar com acesso anônimo
+                </button>
+                <button 
+                  onClick={() => setShowAnonymousWarning(false)}
+                  className="w-full py-2 text-[10px] font-black text-zinc-500 hover:text-white uppercase tracking-widest transition-colors"
+                >
+                  Voltar e Vincular Discord
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+
+        {globalState.maintenance && !isMaster && (
+          <motion.div 
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            className="fixed inset-0 z-[1000] bg-zinc-950 flex flex-col items-center justify-center p-8 text-center"
+          >
+            <div className="w-24 h-24 bg-red-600 rounded-[2rem] flex items-center justify-center mb-8 shadow-2xl shadow-red-900/40 animate-bounce">
+              <Settings2 size={48} className="text-white animate-spin-slow" />
+            </div>
+            <h2 className="text-4xl font-black text-white uppercase tracking-tighter italic mb-4">Em Manutenção</h2>
+            <p className="text-zinc-500 max-w-md font-medium leading-relaxed">
+              Estamos ajustando os motores! A oficina voltará a operar em breve. Por favor, tente novamente mais tarde.
+            </p>
+            <div className="mt-12 text-[10px] text-zinc-700 font-black uppercase tracking-[0.3em]">
+              Summer Garage • 2026
+            </div>
           </motion.div>
         )}
       </AnimatePresence>
@@ -672,22 +1260,68 @@ export default function App() {
               <h1 className="text-lg font-black tracking-tighter text-white uppercase italic leading-none">
                 Summer <span className="text-red-600">Garage</span>
               </h1>
-              <p className="text-[9px] text-zinc-500 uppercase tracking-[0.2em] font-bold mt-1">Mecânica Especializada</p>
+              <p className="text-[9px] text-zinc-500 uppercase tracking-[0.2em] font-bold mt-1 flex items-center gap-2">
+                Mecânica Especializada
+                {isMaster && (
+                  <span className="text-[7px] bg-yellow-500/20 text-yellow-500 px-1 rounded animate-pulse border border-yellow-500/30">
+                    DEVELOPER MODE
+                  </span>
+                )}
+              </p>
             </div>
           </div>
+
+          {/* Real-time Clock (Desktop) */}
+          <button 
+            onClick={toggleClockFormat}
+            onMouseEnter={() => showTooltip("Clique para alternar formato 12h/24h")}
+            onMouseLeave={hideTooltip}
+            className="hidden md:flex flex-col items-center justify-center border-x border-zinc-800/50 px-10 h-full hover:bg-zinc-800/30 transition-colors group cursor-pointer"
+          >
+            <div className="text-2xl font-black text-white tracking-tighter italic leading-none tabular-nums group-hover:text-red-500 transition-colors">
+              {time.toLocaleTimeString('pt-BR', { hour12: !is24Hour, hour: '2-digit', minute: '2-digit' })}
+            </div>
+            <div className="text-[9px] text-red-600 font-black uppercase tracking-[0.2em] mt-1.5 flex items-center gap-2">
+              {time.toLocaleDateString('pt-BR', { day: '2-digit', month: 'long', year: 'numeric' })}
+              <span className="text-[7px] bg-zinc-800 px-1 rounded text-zinc-500 group-hover:text-white transition-colors">
+                {is24Hour ? '24H' : '12H'}
+              </span>
+            </div>
+          </button>
+
+          {/* Real-time Clock (Mobile) */}
+          <button 
+            onClick={toggleClockFormat}
+            onMouseEnter={() => showTooltip("Clique para alternar formato 12h/24h")}
+            onMouseLeave={hideTooltip}
+            className="md:hidden flex flex-col items-end justify-center active:scale-95 transition-transform"
+          >
+            <div className="text-lg font-black text-white tracking-tighter italic leading-none tabular-nums">
+              {time.toLocaleTimeString('pt-BR', { hour12: !is24Hour, hour: '2-digit', minute: '2-digit' })}
+            </div>
+            <div className="text-[7px] text-red-600 font-black uppercase tracking-widest mt-1 flex items-center gap-1">
+              {time.toLocaleDateString('pt-BR', { day: '2-digit', month: 'short' })}
+              <span className="text-[6px] opacity-50">{is24Hour ? '24H' : '12H'}</span>
+            </div>
+          </button>
 
           <div className="flex items-center gap-4">
             {user && (
               <div className="hidden sm:flex items-center gap-3 bg-zinc-900/50 border border-zinc-800 px-3 py-1.5 rounded-full">
                 <div className="w-6 h-6 rounded-full overflow-hidden border border-red-600">
                   <img 
-                    src={user.avatar ? `https://cdn.discordapp.com/avatars/${user.id}/${user.avatar}.png` : `https://cdn.discordapp.com/embed/avatars/0.png`} 
+                    src={isAnonymous ? `https://pub-a1b327e0f0794695b6f7d05baa938672.r2.dev/silhouette-1345388323-612x612.png` : (user.avatar ? `https://cdn.discordapp.com/avatars/${user.id}/${user.avatar}.png` : `https://cdn.discordapp.com/embed/avatars/0.png`)} 
                     alt={user.username}
                     className="w-full h-full object-cover"
                   />
                 </div>
-                <span className="text-xs font-bold text-zinc-300">{user.username}</span>
-                <button onClick={handleLogout} className="text-zinc-500 hover:text-red-500 transition-colors">
+                <span className="text-xs font-bold text-zinc-300">{isAnonymous ? 'Anônimo' : user.username}</span>
+                <button 
+                  onClick={handleLogout} 
+                  onMouseEnter={() => showTooltip("Encerrar Sessão")}
+                  onMouseLeave={hideTooltip}
+                  className="text-zinc-500 hover:text-red-500 transition-colors"
+                >
                   <LogOut size={14} />
                 </button>
               </div>
@@ -709,50 +1343,18 @@ export default function App() {
       </div>
     </motion.header>
 
-      <main className="max-w-7xl mx-auto px-4 py-8 grid grid-cols-1 lg:grid-cols-12 gap-8 relative z-10">
-        {/* Mobile Tab Switcher */}
-        <div id="tutorial-tabs" className="lg:col-span-12 lg:h-1">
-          <div className="lg:hidden sticky top-20 z-30 bg-zinc-950/95 backdrop-blur-sm -mx-4 px-4 py-3 border-b border-zinc-800 overflow-hidden" ref={tabsRef}>
-            <motion.div 
-              ref={tabsContentRef}
-              drag="x"
-              dragConstraints={dragConstraints}
-              dragElastic={0.1}
-              className="flex items-center gap-2 cursor-grab active:cursor-grabbing w-max pr-10"
-            >
-              {[
-                { id: 'upgrades', label: 'Upgrades', icon: <Zap size={16} /> },
-                { id: 'items', label: 'Itens', icon: <Package size={16} /> },
-                { id: 'services', label: 'Serviços', icon: <Truck size={16} /> },
-                { id: 'summary', label: 'Resumo', icon: <Settings2 size={16} /> },
-                { id: 'mechanic', label: 'Mecânico', icon: <User size={16} /> },
-              ].map((tab) => (
-                <button
-                  key={tab.id}
-                  onClick={() => setActiveTab(tab.id as any)}
-                  onPointerDown={(e) => e.stopPropagation()}
-                  className={`
-                    flex items-center gap-2 px-4 py-2 rounded-full text-xs font-bold whitespace-nowrap transition-all
-                    ${activeTab === tab.id 
-                      ? 'bg-red-600 text-white shadow-lg shadow-red-900/20' 
-                      : 'bg-zinc-900 text-zinc-400 border border-zinc-800'}
-                  `}
-                >
-                  {tab.icon}
-                  {tab.label}
-                </button>
-              ))}
-            </motion.div>
-          </div>
-        </div>
+      <main className="max-w-7xl mx-auto px-4 pt-8 pb-40 lg:pb-8 grid grid-cols-1 lg:grid-cols-12 gap-8 relative z-10">
+        {/* Mobile Tab Switcher - Hidden in favor of bottom bar */}
+        <div id="tutorial-tabs" className="lg:col-span-12 lg:h-1 hidden lg:block" />
 
         {/* Left Column: Controls */}
         <AnimatePresence mode="wait">
           <motion.div 
-            key={activeTab === 'summary' || activeTab === 'mechanic' ? 'side' : 'main'}
-            initial={{ opacity: 0, x: -10 }}
-            animate={{ opacity: 1, x: 0 }}
-            exit={{ opacity: 0, x: 10 }}
+            key={activeTab}
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -10 }}
+            transition={{ duration: 0.2, ease: "easeOut" }}
             id="tutorial-calculator" 
             className={`lg:col-span-8 space-y-8 ${(activeTab === 'summary' || activeTab === 'mechanic') ? 'hidden lg:block' : ''}`}
           >
@@ -998,6 +1600,101 @@ export default function App() {
               </div>
             </div>
           </section>
+
+          {/* Rules and Warnings Section (Main Column) */}
+          <section className={`space-y-4 hidden lg:block`}>
+            <div className="flex items-center gap-2 text-red-500">
+              <AlertTriangle size={20} />
+              <h2 className="text-lg font-bold uppercase tracking-tight">Regras e Avisos Importantes</h2>
+            </div>
+            
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              <div 
+                className="bg-zinc-900 border border-zinc-800 p-6 rounded-2xl hover:border-red-500/30 transition-all group"
+                onMouseEnter={() => showTooltip("Prazos de pagamento e conferência de metas")}
+                onMouseLeave={hideTooltip}
+              >
+                <div className="flex items-center gap-3 mb-4">
+                  <div className="p-2 bg-red-500/10 rounded-xl group-hover:bg-red-500/20 transition-colors">
+                    <Calendar size={20} className="text-red-500" />
+                  </div>
+                  <h4 className="text-sm font-black text-white uppercase tracking-widest">Prazos e Conferência</h4>
+                </div>
+                <ul className="space-y-3">
+                  <li className="flex items-start gap-3">
+                    <div className="w-1.5 h-1.5 rounded-full bg-red-500 mt-1.5 shrink-0 shadow-[0_0_8px_rgba(239,68,68,0.5)]" />
+                    <div className="space-y-1">
+                      <p className="text-xs text-zinc-400 font-medium leading-relaxed">Dinheiro: <span className="text-white font-bold">todo domingo</span></p>
+                      <div className="bg-black/20 p-2 rounded-lg border border-white/5 space-y-1">
+                        <p className="text-[10px] text-zinc-300 font-bold flex items-center gap-1">
+                          <span className="text-green-500">💵</span> Valor: R$ 15.000,00
+                        </p>
+                        <p className="text-[10px] text-zinc-400">
+                          <span className="text-red-500">📥</span> Depósito: Passaporte 40 – CaZe Shakur
+                        </p>
+                      </div>
+                    </div>
+                  </li>
+                  <li className="flex items-start gap-3">
+                    <div className="w-1.5 h-1.5 rounded-full bg-red-500 mt-1.5 shrink-0 shadow-[0_0_8px_rgba(239,68,68,0.5)]" />
+                    <div className="space-y-1">
+                      <p className="text-xs text-zinc-400 font-medium leading-relaxed">Meta semanal: <span className="text-white font-bold">conferida toda segunda-feira</span></p>
+                      <div className="bg-black/20 p-2 rounded-lg border border-white/5">
+                        <p className="text-[9px] text-zinc-500 font-bold uppercase tracking-tighter mb-1 flex items-center gap-1">
+                          <span className="text-red-500">📌</span> Finalidade:
+                        </p>
+                        <ul className="space-y-0.5">
+                          <li className="text-[9px] text-zinc-400">• Pagamento do Alvará</li>
+                          <li className="text-[9px] text-zinc-400">• Aquisição do negócio</li>
+                          <li className="text-[9px] text-zinc-400">• Upgrades futuros (baú)</li>
+                        </ul>
+                      </div>
+                    </div>
+                  </li>
+                  <li className="flex items-start gap-3">
+                    <div className="w-1.5 h-1.5 rounded-full bg-red-500 mt-1.5 shrink-0 shadow-[0_0_8px_rgba(239,68,68,0.5)]" />
+                    <p className="text-xs text-zinc-500 font-medium italic leading-relaxed">No início, a conferência será feita diariamente</p>
+                  </li>
+                </ul>
+              </div>
+
+              <div 
+                className="bg-zinc-900 border border-zinc-800 p-6 rounded-2xl hover:border-yellow-500/30 transition-all group"
+                onMouseEnter={() => showTooltip("Avisos sobre penalidades e ausências")}
+                onMouseLeave={hideTooltip}
+              >
+                <div className="flex items-center gap-3 mb-4">
+                  <div className="p-2 bg-yellow-500/10 rounded-xl group-hover:bg-yellow-500/20 transition-colors">
+                    <AlertTriangle size={20} className="text-yellow-500" />
+                  </div>
+                  <h4 className="text-sm font-black text-white uppercase tracking-widest">Avisos e Penalidades</h4>
+                </div>
+                <ul className="space-y-3">
+                  <li className="flex items-center gap-3">
+                    <span className="text-base filter drop-shadow-[0_0_8px_rgba(0,0,0,0.5)]">💵</span>
+                    <p className="text-xs text-zinc-400 font-medium">Falta pagamento da meta semanal em dinheiro</p>
+                  </li>
+                  <li className="flex items-center gap-3">
+                    <span className="text-base filter drop-shadow-[0_0_8px_rgba(0,0,0,0.5)]">❗</span>
+                    <p className="text-xs text-zinc-400 font-medium">Falta cumprimento da meta de itens</p>
+                  </li>
+                  <li className="flex items-center gap-3">
+                    <span className="text-base filter drop-shadow-[0_0_8px_rgba(0,0,0,0.5)]">❌</span>
+                    <p className="text-xs text-zinc-400 font-medium">Sujeito a desligamento por reincidência</p>
+                  </li>
+                  <li className="flex items-start gap-3 pt-3 border-t border-zinc-800/50 mt-1">
+                    <span className="text-base filter drop-shadow-[0_0_8px_rgba(0,0,0,0.5)]">⏳</span>
+                    <p className="text-[11px] text-zinc-500 font-medium italic leading-relaxed">Ausências superiores a 3 dias, quando justificadas, poderão gerar abatimento da meta.</p>
+                  </li>
+                </ul>
+                <div className="mt-4 pt-4 border-t border-zinc-800/50">
+                  <p className="text-xs font-black text-white uppercase tracking-[0.2em] text-center italic">
+                    Comunicação é obrigatória.
+                  </p>
+                </div>
+              </div>
+            </div>
+          </section>
         </motion.div>
       </AnimatePresence>
 
@@ -1013,7 +1710,11 @@ export default function App() {
             >
             {/* Summary Section - Hidden on mobile if tab is 'mechanic' */}
             <div id="tutorial-summary" className={`bg-zinc-900 border border-zinc-800 rounded-3xl overflow-hidden shadow-2xl shadow-black/50 ${activeTab === 'mechanic' ? 'hidden lg:block' : 'block'}`}>
-              <div className="bg-red-600 p-6">
+              <div 
+                className="bg-red-600 p-6"
+                onMouseEnter={() => showTooltip("Resumo Geral da Fatura")}
+                onMouseLeave={hideTooltip}
+              >
                 <h2 className="text-white font-black uppercase tracking-tighter text-2xl italic">Resumo da Fatura</h2>
               </div>
               
@@ -1024,7 +1725,11 @@ export default function App() {
                   <SummaryRow label="Subtotal Serviços" value={totals.servicos} />
                 </div>
                 
-                <div className="pt-6 border-t border-zinc-800">
+                <div 
+                  className="pt-6 border-t border-zinc-800"
+                  onMouseEnter={() => showTooltip("Valor Total a ser Cobrado")}
+                  onMouseLeave={hideTooltip}
+                >
                   <div className="flex justify-between items-end">
                     <div>
                       <p className="text-[10px] text-zinc-500 font-bold uppercase tracking-widest mb-1">Total Final</p>
@@ -1033,13 +1738,27 @@ export default function App() {
                   </div>
                 </div>
 
-                <button 
-                  onClick={resetAll}
-                  className="w-full bg-red-600 hover:bg-red-700 text-white font-bold py-4 rounded-2xl transition-all shadow-lg shadow-red-900/20 active:scale-95 flex items-center justify-center gap-2"
-                >
-                  <Trash2 size={20} />
-                  Limpar Tudo
-                </button>
+                <div className="space-y-3">
+                  <button 
+                    onClick={registerSale}
+                    onMouseEnter={() => showTooltip("Registrar Venda no Histórico")}
+                    onMouseLeave={hideTooltip}
+                    className="w-full bg-red-600 hover:bg-red-700 text-white font-black uppercase tracking-widest py-4 rounded-2xl transition-all shadow-lg shadow-red-900/20 active:scale-95 flex items-center justify-center gap-2 group"
+                  >
+                    <CheckCircle2 size={20} className="group-hover:scale-110 transition-transform" />
+                    Registrar Venda
+                  </button>
+                  
+                  <button 
+                    onClick={() => clearForm()}
+                    onMouseEnter={() => showTooltip("Limpar Orçamento sem Registrar")}
+                    onMouseLeave={hideTooltip}
+                    className="w-full bg-zinc-800/50 hover:bg-zinc-800 text-zinc-400 font-bold py-3 rounded-xl transition-all active:scale-95 flex items-center justify-center gap-2 text-xs uppercase tracking-widest border border-zinc-800"
+                  >
+                    <Trash2 size={14} />
+                    Limpar Tudo
+                  </button>
+                </div>
               </div>
             </div>
 
@@ -1059,15 +1778,20 @@ export default function App() {
                   id="tutorial-mechanic"
                   initial={{ opacity: 0, y: 20 }}
                   animate={{ opacity: 1, y: 0 }}
-                  className={`bg-zinc-900/40 backdrop-blur-md border border-zinc-800 p-6 rounded-3xl relative overflow-hidden group ${activeTab === 'summary' ? 'hidden lg:block' : 'block'}`}
+                  className={`bg-zinc-900/40 backdrop-blur-md border ${isMaster ? 'border-yellow-500/30' : 'border-zinc-800'} p-6 rounded-3xl relative overflow-hidden group ${activeTab === 'summary' ? 'hidden lg:block' : 'block'}`}
                 >
+                  {isMaster && (
+                    <div className="absolute top-0 right-0 p-2">
+                      <Shield size={12} className="text-yellow-500 opacity-50" />
+                    </div>
+                  )}
                   <div className="absolute inset-0 bg-gradient-to-br from-white/5 to-transparent opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none" />
                   
-                  <div className="relative z-10 flex items-center gap-4">
+                  <div className="relative z-10 flex items-center gap-4 mb-6 lg:mb-4">
                     <div className="relative">
-                      <div className="w-16 h-16 rounded-2xl overflow-hidden border-2 border-red-600 shadow-lg shadow-red-900/20">
+                      <div className="w-16 h-16 sm:w-20 sm:h-20 rounded-2xl overflow-hidden border-2 border-red-600 shadow-lg shadow-red-900/20">
                         <img 
-                          src={user.avatar ? `https://cdn.discordapp.com/avatars/${user.id}/${user.avatar}.png` : `https://cdn.discordapp.com/embed/avatars/0.png`} 
+                          src={isAnonymous ? `https://pub-a1b327e0f0794695b6f7d05baa938672.r2.dev/silhouette-1345388323-612x612.png` : (user.avatar ? `https://cdn.discordapp.com/avatars/${user.id}/${user.avatar}.png` : `https://cdn.discordapp.com/embed/avatars/0.png`)} 
                           alt={user.username}
                           className="w-full h-full object-cover"
                         />
@@ -1077,45 +1801,137 @@ export default function App() {
                     
                     <div className="flex-1">
                       <div className="flex flex-wrap items-center gap-2 mb-1">
-                        {user.roles && user.roles.filter(r => !/^\d+$/.test(r)).length > 0 ? (
-                          user.roles.filter(r => !/^\d+$/.test(r)).map((roleName: string) => (
-                            <span key={roleName} className="text-[10px] font-black text-red-500 uppercase tracking-[0.2em]">
-                              {roleName}
-                            </span>
-                          ))
-                        ) : (
-                          <span className="text-[10px] font-black text-red-500 uppercase tracking-[0.2em]">
-                            MECÂNICO AUTORIZADO
+                        {isMaster && (
+                          <span className="text-[10px] font-black text-yellow-500 uppercase tracking-[0.2em] animate-pulse">
+                            DEVELOPER
                           </span>
                         )}
+                        {!isAnonymous && (
+                          user.roles && user.roles.filter(r => !/^\d+$/.test(r)).length > 0 ? (
+                            user.roles.filter(r => !/^\d+$/.test(r)).map((roleName: string) => (
+                              <span key={roleName} className="text-[10px] font-black text-red-500 uppercase tracking-[0.2em]">
+                                {roleName}
+                              </span>
+                            ))
+                          ) : (
+                            <span className="text-[10px] font-black text-red-500 uppercase tracking-[0.2em]">
+                              MECÂNICO AUTORIZADO
+                            </span>
+                          )
+                        )}
                       </div>
-                      <h3 className="text-xl font-black text-white uppercase tracking-tighter italic">{user.displayName || user.username}</h3>
-                      <div className="flex flex-wrap items-center gap-2 mt-1">
-                        <span className="bg-zinc-800 text-zinc-400 text-[9px] font-bold px-2 py-0.5 rounded uppercase tracking-widest">ID: {user.id.slice(-6)}</span>
-                        <button 
-                          onClick={() => {
-                            localStorage.removeItem('summer_garage_tutorial_seen');
-                            setTutorialStep(0);
-                            setShowTutorial(true);
-                            addToast('Iniciando guia da oficina...', 'info');
-                          }}
-                          className="text-[9px] text-zinc-600 hover:text-red-500 font-bold uppercase tracking-widest flex items-center gap-1.5 transition-colors"
-                        >
-                          <Info size={10} />
-                          Tutorial
-                        </button>
+                      <div className="flex flex-col">
+                        {isAnonymous ? (
+                          <p className="text-lg sm:text-xl font-black text-white uppercase tracking-tighter italic leading-none">
+                            Mecânico Summer Garage
+                          </p>
+                        ) : (
+                          <input 
+                            type="text"
+                            value={mechanicState.mechanicName}
+                            onChange={(e) => setMechanicState((prev: any) => ({ ...prev, mechanicName: e.target.value }))}
+                            placeholder={user.displayName || user.username}
+                            className="bg-transparent border-none text-lg sm:text-xl font-black text-white uppercase tracking-tighter italic focus:outline-none focus:ring-0 p-0 w-full placeholder:opacity-50"
+                            onMouseEnter={() => showTooltip("Clique para editar seu nome de guerra")}
+                            onMouseLeave={hideTooltip}
+                          />
+                        )}
                       </div>
+                      {!isAnonymous && (
+                        <div className="flex flex-wrap items-center gap-2 mt-1">
+                          <span className="bg-zinc-800 text-zinc-400 text-[9px] font-bold px-2 py-0.5 rounded uppercase tracking-widest">ID: {user.id.slice(-6)}</span>
+                          <button 
+                            onClick={() => {
+                              localStorage.removeItem('summer_garage_tutorial_seen');
+                              setTutorialStep(0);
+                              setShowTutorial(true);
+                              addToast('Iniciando guia da oficina...', 'info');
+                            }}
+                            className="text-[9px] text-zinc-600 hover:text-red-500 font-bold uppercase tracking-widest flex items-center gap-1.5 transition-colors"
+                          >
+                            <Info size={10} />
+                            Tutorial
+                          </button>
+                        </div>
+                      )}
                     </div>
                   </div>
 
-                  {/* Goals Section */}
-                  <div className="mt-6 space-y-4">
-                    <div className="bg-zinc-950/50 rounded-2xl p-4 border border-zinc-800/50">
-                      <div className="flex items-center gap-2 mb-3">
-                        <div className="p-1.5 bg-green-500/10 rounded-lg">
-                          <Zap size={14} className="text-green-500" />
+                  {/* Master Panel Section */}
+                  {isMaster && (
+                    <div className="mt-8 pt-6 border-t border-yellow-500/20 space-y-4">
+                      <div className="flex items-center gap-2 text-yellow-500 mb-4">
+                        <Shield size={16} />
+                        <h3 className="text-xs font-black uppercase tracking-[0.2em]">DEV MODE ACTIVATED</h3>
+                      </div>
+                      
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <button 
+                          onClick={() => {
+                            setMechanicState((prev: any) => ({
+                              ...prev,
+                              salesLog: { upgrades: 0, items: 0, avulsos: 0, services: 0, totalValue: 0, count: 0, history: {} }
+                            }));
+                            addToast('MODO MASTER: Histórico Global Resetado!', 'warning');
+                          }}
+                          className="bg-yellow-500/10 border border-yellow-500/30 p-3 rounded-xl text-[10px] font-black text-yellow-500 uppercase tracking-widest hover:bg-yellow-500/20 transition-all flex items-center justify-center gap-2"
+                        >
+                          <Trash2 size={12} />
+                          Reset Global Log
+                        </button>
+                        <button 
+                          id="tutorial-master-goals"
+                          onClick={() => {
+                            setTempGoals(goals);
+                            setShowGoalModal(true);
+                          }}
+                          className="bg-yellow-500/10 border border-yellow-500/30 p-3 rounded-xl text-[10px] font-black text-yellow-500 uppercase tracking-widest hover:bg-yellow-500/20 transition-all flex items-center justify-center gap-2"
+                        >
+                          <Zap size={12} />
+                          Set Goals
+                        </button>
+                      </div>
+                      
+                      <div className="bg-zinc-950/80 p-4 rounded-2xl border border-yellow-500/10">
+                        <p className="text-[9px] text-zinc-500 uppercase font-bold mb-2 tracking-widest">Debug Info</p>
+                        <div className="grid grid-cols-2 gap-x-4 gap-y-1">
+                          <p className="text-[9px] text-zinc-400 font-mono truncate">ID: {user.id}</p>
+                          <p className="text-[9px] text-zinc-400 font-mono">Tab: {activeTab}</p>
+                          <p className="text-[9px] text-zinc-400 font-mono">OS: {navigator.platform}</p>
+                          <p className="text-[9px] text-zinc-400 font-mono">Sales: {mechanicState.salesLog?.count || 0}</p>
+                          <p className="text-[9px] text-zinc-400 font-mono col-span-2">Status: <span className="text-green-500">ROOT_ACCESS</span></p>
                         </div>
-                        <h4 className="text-[11px] font-black text-white uppercase tracking-widest italic">Meta Financeira Semanal</h4>
+                      </div>
+                    </div>
+                  )}
+                  <div className="mt-6 space-y-6">
+                    <div className="lg:hidden pt-4 border-t border-zinc-800/50">
+                      <h3 className="text-[10px] font-black text-red-500 uppercase tracking-[0.3em] mb-4 italic">Metas e Produtividade</h3>
+                    </div>
+
+                    <div 
+                      id="tutorial-finance-goal"
+                      className="bg-zinc-950/50 rounded-2xl p-4 border border-zinc-800/50"
+                      onMouseEnter={() => showTooltip("Sua Meta Financeira Semanal")}
+                      onMouseLeave={hideTooltip}
+                    >
+                      <div className="flex items-center justify-between mb-3">
+                        <div className="flex items-center gap-2">
+                          <div className="p-1.5 bg-green-500/10 rounded-lg">
+                            <Zap size={14} className="text-green-500" />
+                          </div>
+                          <h4 className="text-[11px] font-black text-white uppercase tracking-widest italic">Meta Financeira Semanal</h4>
+                        </div>
+                        <button 
+                          id="tutorial-sales-tracker"
+                          onClick={() => setShowSalesLog(true)}
+                          onMouseEnter={() => showTooltip("Ver Histórico de Vendas")}
+                          onMouseLeave={hideTooltip}
+                          className="flex items-center gap-1.5 px-2 py-1 bg-red-600/10 hover:bg-red-600/20 border border-red-600/20 rounded-lg transition-all group active:scale-95"
+                        >
+                          <Gauge size={12} className="text-red-500 group-hover:rotate-12 transition-transform" />
+                          <span className="text-[9px] font-black text-red-500 uppercase tracking-widest">Sales Tracker</span>
+                        </button>
                       </div>
                       <div className="flex items-end justify-between">
                         <div>
@@ -1128,7 +1944,7 @@ export default function App() {
                           <button 
                             id="tutorial-finance-status"
                             onClick={toggleFinanceStatus}
-                            className={`text-[10px] font-bold px-2 py-1 rounded-full uppercase tracking-tighter transition-colors ${
+                            className={`text-[10px] font-bold px-2 py-1 rounded-full uppercase tracking-tighter transition-all active:scale-95 ${
                               mechanicState.financeStatus === 'PAGA' ? 'bg-green-500/20 text-green-500' :
                               mechanicState.financeStatus === 'EM DIA' ? 'bg-blue-500/20 text-blue-500' :
                               'bg-red-500/20 text-red-500'
@@ -1140,8 +1956,16 @@ export default function App() {
                       </div>
                     </div>
 
-                    <div className="grid grid-cols-2 gap-3">
-                      <div id="tutorial-daily-farm" className="relative bg-zinc-950/50 rounded-2xl p-4 border border-zinc-800/50">
+                    <div 
+                      id="tutorial-all-farms"
+                      className="grid grid-cols-1 sm:grid-cols-3 gap-3"
+                    >
+                      <div 
+                        id="tutorial-daily-farm" 
+                        className="relative bg-zinc-950/50 rounded-2xl p-4 border border-zinc-800/50"
+                        onMouseEnter={() => showTooltip("Progresso de Farm Diário")}
+                        onMouseLeave={hideTooltip}
+                      >
                         <div className="flex items-center gap-2 mb-2">
                           <Package size={14} className="text-red-500" />
                           <h4 className="text-[9px] font-black text-zinc-400 uppercase tracking-widest">Daily Farm</h4>
@@ -1155,7 +1979,12 @@ export default function App() {
                           <Trash2 size={12} />
                         </button>
                       </div>
-                      <div id="tutorial-weekly-farm" className="relative bg-zinc-950/50 rounded-2xl p-4 border border-zinc-800/50">
+                      <div 
+                        id="tutorial-weekly-farm" 
+                        className="relative bg-zinc-950/50 rounded-2xl p-4 border border-zinc-800/50"
+                        onMouseEnter={() => showTooltip("Progresso de Farm Semanal")}
+                        onMouseLeave={hideTooltip}
+                      >
                         <div className="flex items-center gap-2 mb-2">
                           <Shield size={14} className="text-red-500" />
                           <h4 className="text-[9px] font-black text-zinc-400 uppercase tracking-widest">Weekly Farm</h4>
@@ -1169,45 +1998,161 @@ export default function App() {
                           <Trash2 size={12} />
                         </button>
                       </div>
+                      <div 
+                        className="relative bg-zinc-950/50 rounded-2xl p-4 border border-zinc-800/50"
+                        onMouseEnter={() => showTooltip("Progresso de Farm Mensal")}
+                        onMouseLeave={hideTooltip}
+                      >
+                        <div className="flex items-center gap-2 mb-2">
+                          <Calendar size={14} className="text-red-500" />
+                          <h4 className="text-[9px] font-black text-zinc-400 uppercase tracking-widest">Monthly Farm</h4>
+                        </div>
+                        <p className="text-lg font-black text-white tracking-tighter">{mechanicState.monthlyFarm}</p>
+                      </div>
                     </div>
 
                     {/* Manual Farm Entry */}
                     <div id="tutorial-manual-farm" className="bg-red-600/5 border border-red-600/20 rounded-xl p-3">
                       <p className="text-[9px] font-black text-red-500 uppercase mb-2 tracking-widest">Lançar Farm Manual</p>
-                      <div className="flex gap-2">
-                        <input 
-                          type="number" 
-                          value={farmInput}
-                          onChange={(e) => setFarmInput(e.target.value)}
-                          placeholder="Qtd..."
-                          className="flex-1 bg-black/40 border border-white/10 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:border-red-500/50"
-                        />
-                        <button 
-                          onClick={handleAddFarm}
-                          className="bg-red-600 hover:bg-red-500 text-white px-3 py-1.5 rounded-lg text-[10px] font-black transition-colors"
-                        >
-                          OK
-                        </button>
+                      <div className="flex flex-col gap-2">
+                        <div className="flex items-center gap-2">
+                          {/* Custom Dropdown */}
+                          <div className="flex-1 relative">
+                            <button 
+                              onClick={() => setIsFarmDropdownOpen(!isFarmDropdownOpen)}
+                              className="w-full bg-black/40 border border-white/10 rounded-lg px-3 py-1.5 text-[10px] font-bold text-white flex items-center justify-between hover:border-red-500/30 transition-colors"
+                            >
+                              <span className="truncate">{selectedFarmItem}</span>
+                              <ChevronDown size={12} className={`text-red-500 transition-transform ${isFarmDropdownOpen ? 'rotate-180' : ''}`} />
+                            </button>
+
+                            <AnimatePresence>
+                              {isFarmDropdownOpen && (
+                                <>
+                                  <motion.div 
+                                    initial={{ opacity: 0 }}
+                                    animate={{ opacity: 1 }}
+                                    exit={{ opacity: 0 }}
+                                    onClick={() => setIsFarmDropdownOpen(false)}
+                                    className="fixed inset-0 z-40"
+                                  />
+                                  <motion.div 
+                                    initial={{ opacity: 0, y: 10, scale: 0.95 }}
+                                    animate={{ opacity: 1, y: 0, scale: 1 }}
+                                    exit={{ opacity: 0, y: 10, scale: 0.95 }}
+                                    className="absolute left-0 right-0 bottom-full mb-2 bg-zinc-900 border border-white/10 rounded-xl shadow-2xl overflow-hidden z-50"
+                                  >
+                                    <div className="max-h-48 overflow-y-auto no-scrollbar p-1">
+                                      {farmItems.map((item) => (
+                                        <button
+                                          key={item}
+                                          onClick={() => {
+                                            setSelectedFarmItem(item);
+                                            setIsFarmDropdownOpen(false);
+                                          }}
+                                          className={`w-full text-left px-3 py-2 text-[10px] font-bold rounded-lg transition-colors ${
+                                            selectedFarmItem === item 
+                                              ? 'bg-red-600 text-white' 
+                                              : 'text-zinc-400 hover:bg-white/5 hover:text-white'
+                                          }`}
+                                        >
+                                          {item}
+                                        </button>
+                                      ))}
+                                    </div>
+                                  </motion.div>
+                                </>
+                              )}
+                            </AnimatePresence>
+                          </div>
+
+                          <div className="flex-[1.5] relative">
+                            <input 
+                              type="number" 
+                              value={farmInput}
+                              onChange={(e) => setFarmInput(e.target.value)}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') {
+                                  handleAddFarm();
+                                }
+                              }}
+                              onMouseEnter={() => showTooltip("Digitar volume de peças manualmente")}
+                              onMouseLeave={hideTooltip}
+                              placeholder="Quantidade..."
+                              className="w-full bg-black/40 border border-white/10 rounded-lg px-3 py-1.5 pr-8 text-xs text-white focus:outline-none focus:border-red-500/50 [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                            />
+                            {farmInput && (
+                              <button 
+                                onClick={() => setFarmInput('')}
+                                className="absolute right-2 top-1/2 -translate-y-1/2 text-zinc-600 hover:text-zinc-400 p-1"
+                              >
+                                <X size={12} />
+                              </button>
+                            )}
+                          </div>
+                          <button 
+                            onClick={handleAddFarm}
+                            className="bg-red-600 hover:bg-red-500 text-white px-3 py-1.5 rounded-lg text-[10px] font-black transition-all active:scale-90"
+                          >
+                            OK
+                          </button>
+                        </div>
                       </div>
                     </div>
 
                     {/* Items List */}
-                    <div id="tutorial-items-list" className="space-y-2">
+                    <div 
+                      id="tutorial-items-list" 
+                      className="space-y-2"
+                      onMouseEnter={() => showTooltip("Lista detalhada de materiais necessários para as metas")}
+                      onMouseLeave={hideTooltip}
+                    >
                       <p className="text-[9px] font-black text-zinc-500 uppercase tracking-widest">Itens Necessários</p>
-                      <div className="grid grid-cols-2 gap-2">
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                         {[
-                          { name: 'Sucata', icon: '📦' },
-                          { name: 'Peças Metal', icon: '⚙️' },
-                          { name: 'Fios Cobre', icon: '🔌' },
-                          { name: 'Plástico', icon: '🧪' },
-                          { name: 'Bateria', icon: '🔋' },
-                          { name: 'Alumínio', icon: '💿' }
-                        ].map((item) => (
-                          <div key={item.name} className="flex items-center gap-2 p-2 bg-white/[0.02] border border-white/5 rounded-lg">
-                            <span className="text-xs">{item.icon}</span>
-                            <span className="text-[9px] font-bold text-zinc-400 uppercase">{item.name}</span>
-                          </div>
-                        ))}
+                          { name: 'Caixa de ferramentas', icon: '🧰' },
+                          { name: 'Ferramentas', icon: '🛠️' },
+                          { name: 'Metal', icon: '🔩' },
+                          { name: 'Aro de Roda', icon: '🛞' },
+                          { name: 'Roda', icon: '🛞' },
+                          { name: 'Aluminio', icon: '🔗' }
+                        ].map((item) => {
+                          const farm = mechanicState.itemFarms?.[item.name] || { daily: 0, weekly: 0, monthly: 0 };
+                          return (
+                            <div 
+                              key={item.name} 
+                              className="flex flex-col p-2 bg-white/[0.02] border border-white/5 rounded-lg group hover:border-red-500/30 transition-colors cursor-help"
+                              onMouseEnter={() => showTooltip(`Progresso de ${item.name}: ${farm.daily}/${goals.dailyItems} hoje`)}
+                              onMouseLeave={hideTooltip}
+                            >
+                              <div className="flex items-center justify-between mb-1">
+                                <div className="flex items-center gap-2">
+                                  <span className="text-xs">{item.icon}</span>
+                                  <span className="text-[9px] font-bold text-zinc-400 uppercase">{item.name}</span>
+                                </div>
+                                <div className="text-right">
+                                  <span className="text-[9px] font-black text-zinc-500 tracking-tighter">
+                                    <span className="text-red-500/80">{farm.daily}</span>
+                                    <span className="mx-0.5 text-zinc-700">/</span>
+                                    <span className="text-zinc-400">{goals.dailyItems}</span>
+                                  </span>
+                                </div>
+                              </div>
+                              <div className="flex items-center justify-between">
+                                <span className="text-[7px] font-bold text-zinc-600 uppercase">Semanal</span>
+                                <span className="text-[8px] font-bold text-zinc-500">
+                                  {farm.weekly} / {goals.weeklyItems}
+                                </span>
+                              </div>
+                              <div className="flex items-center justify-between">
+                                <span className="text-[7px] font-bold text-zinc-600 uppercase">Mensal</span>
+                                <span className="text-[8px] font-bold text-zinc-500">
+                                  {farm.monthly} / {goals.monthlyItems}
+                                </span>
+                              </div>
+                            </div>
+                          );
+                        })}
                       </div>
                     </div>
 
@@ -1225,6 +2170,8 @@ export default function App() {
                     </div>
                     <button 
                       onClick={handleLogout}
+                      onMouseEnter={() => showTooltip("Encerrar Sessão")}
+                      onMouseLeave={hideTooltip}
                       className="text-[10px] font-black text-zinc-500 hover:text-red-500 uppercase tracking-widest transition-colors flex items-center gap-1"
                     >
                       <LogOut size={12} />
@@ -1247,50 +2194,81 @@ export default function App() {
       </footer>
 
       {/* Mobile Fixed Footer */}
-      <div className="lg:hidden fixed bottom-0 left-0 right-0 z-50 bg-zinc-950/80 backdrop-blur-xl border-t border-zinc-800/50 px-2 pt-3 pb-8 shadow-[0_-10px_40px_rgba(0,0,0,0.5)]">
-        <div className="max-w-md mx-auto flex items-center justify-between relative">
-          {[
-            { id: 'upgrades', icon: Zap, label: 'Tuning' },
-            { id: 'items', icon: Disc, label: 'Itens' },
-            { id: 'services', icon: Truck, label: 'Serviços' },
-            { id: 'summary', icon: Settings2, label: 'Fatura' },
-            { id: 'mechanic', icon: User, label: 'Perfil' },
-          ].map((tab) => {
-            const Icon = tab.icon;
-            const isActive = activeTab === tab.id;
-            return (
-              <button 
-                key={tab.id}
-                onClick={() => setActiveTab(tab.id as any)}
-                className={`relative flex flex-col items-center gap-1.5 px-3 py-1 transition-all duration-300 ${isActive ? 'text-red-500 scale-110' : 'text-zinc-500 hover:text-zinc-300'}`}
-              >
-                <Icon size={20} strokeWidth={isActive ? 2.5 : 2} />
-                <span className={`text-[8px] font-black uppercase tracking-tighter transition-opacity ${isActive ? 'opacity-100' : 'opacity-60'}`}>
-                  {tab.label}
-                </span>
-                {isActive && (
-                  <motion.div 
-                    layoutId="activeTab"
-                    className="absolute -top-3 left-1/2 -translate-x-1/2 w-1 h-1 bg-red-500 rounded-full shadow-[0_0_8px_#ef4444]"
-                  />
-                )}
-              </button>
-            );
-          })}
+      <div className="lg:hidden fixed bottom-0 left-0 right-0 z-50 bg-zinc-950/90 backdrop-blur-2xl border-t border-zinc-800/50 shadow-[0_-10px_40px_rgba(0,0,0,0.8)]">
+        <div className="flex items-center overflow-x-auto no-scrollbar px-4 pt-3 pb-8 gap-6 snap-x snap-mandatory touch-pan-x">
+          <div className="flex items-center justify-between flex-1 min-w-max gap-6">
+            {[
+              { id: 'upgrades', icon: Zap, label: 'Tuning' },
+              { id: 'items', icon: Disc, label: 'Itens' },
+              { id: 'services', icon: Truck, label: 'Serviços' },
+              { id: 'summary', icon: Settings2, label: 'Fatura', special: true },
+              { id: 'mechanic', icon: User, label: 'Perfil' },
+            ].map((tab) => {
+              const Icon = tab.icon;
+              const isActive = activeTab === tab.id;
+              return (
+                <button 
+                  key={tab.id}
+                  onClick={() => setActiveTab(tab.id as any)}
+                  onMouseEnter={() => showTooltip(tab.label)}
+                  onMouseLeave={hideTooltip}
+                  className={`relative flex flex-col items-center gap-1.5 px-3 py-1 transition-all duration-300 snap-center ${isActive ? 'text-red-500 scale-110' : 'text-zinc-500 hover:text-zinc-300'} ${tab.special ? 'bg-red-600/10 rounded-2xl border border-red-600/20 px-4' : ''}`}
+                >
+                  <Icon size={20} strokeWidth={isActive ? 2.5 : 2} />
+                  <span className={`text-[8px] font-black uppercase tracking-tighter transition-opacity ${isActive ? 'opacity-100' : 'opacity-60'}`}>
+                    {tab.label}
+                  </span>
+                  {isActive && (
+                    <motion.div 
+                      layoutId="activeTab"
+                      className="absolute -top-3 left-1/2 -translate-x-1/2 w-1 h-1 bg-red-500 rounded-full shadow-[0_0_8px_#ef4444]"
+                    />
+                  )}
+                </button>
+              );
+            })}
+          </div>
           
-          <div className="w-px h-6 bg-zinc-800/50 mx-1" />
+          <div className="w-px h-6 bg-zinc-800/50 shrink-0" />
           
-          <button 
-            onClick={resetAll}
-            className="bg-red-600/10 hover:bg-red-600/20 text-red-500 p-2.5 rounded-xl transition-all active:scale-90 border border-red-500/20"
-          >
-            <Trash2 size={18} />
-          </button>
+          <div className="flex items-center gap-1 shrink-0">
+            <button 
+              disabled
+              className="p-2.5 text-zinc-900 cursor-not-allowed opacity-10 pointer-events-none"
+              onMouseEnter={() => showTooltip("Função Desativada")}
+              onMouseLeave={hideTooltip}
+            >
+              <Copy size={18} />
+            </button>
+
+            <button 
+              onClick={() => {
+                localStorage.removeItem('summer_garage_tutorial_seen');
+                setTutorialStep(0);
+                setShowTutorial(true);
+                addToast('Iniciando guia...', 'info');
+              }}
+              onMouseEnter={() => showTooltip("Ver Tutorial")}
+              onMouseLeave={hideTooltip}
+              className="p-2.5 text-zinc-500 hover:text-white transition-all active:scale-90"
+            >
+              <HelpCircle size={18} />
+            </button>
+
+            <button 
+              onClick={registerSale}
+              onMouseEnter={() => showTooltip("Registrar Venda")}
+              onMouseLeave={hideTooltip}
+              className="bg-red-600/10 hover:bg-red-600/20 text-red-500 p-2.5 rounded-xl transition-all active:scale-90 border border-red-500/20"
+            >
+              <CheckCircle2 size={18} />
+            </button>
+          </div>
         </div>
       </div>
 
       {/* Toast Notifications */}
-      <div className="fixed top-24 right-4 z-[400] flex flex-col gap-3 pointer-events-none">
+      <div className={`fixed ${window.innerWidth < 768 ? 'bottom-32' : 'top-24'} right-4 left-4 md:left-auto z-[400] flex flex-col gap-3 pointer-events-none`}>
         <AnimatePresence>
           {toasts.map(toast => (
             <motion.div
@@ -1299,16 +2277,16 @@ export default function App() {
               animate={{ opacity: 1, x: 0, scale: 1 }}
               exit={{ opacity: 0, x: 20, scale: 0.95 }}
               className={`
-                pointer-events-auto flex items-center gap-3 px-4 py-3 rounded-2xl shadow-2xl border min-w-[280px]
-                ${toast.type === 'success' ? 'bg-zinc-900 border-green-900/50 text-green-400' : ''}
-                ${toast.type === 'warning' ? 'bg-zinc-900 border-red-900/50 text-red-400' : ''}
-                ${toast.type === 'info' ? 'bg-zinc-900 border-zinc-800 text-zinc-300' : ''}
+                pointer-events-auto flex items-center gap-3 px-4 py-3 rounded-2xl shadow-[0_10px_30px_rgba(0,0,0,0.5)] border backdrop-blur-md min-w-[280px]
+                ${toast.type === 'success' ? 'bg-zinc-900/90 border-green-500/20 text-green-400 shadow-green-900/10' : ''}
+                ${toast.type === 'warning' ? 'bg-zinc-900/90 border-red-500/20 text-red-400 shadow-red-900/10' : ''}
+                ${toast.type === 'info' ? 'bg-zinc-900/90 border-blue-500/20 text-blue-400 shadow-blue-900/10' : ''}
               `}
             >
               {toast.type === 'success' && <CheckCircle2 size={18} />}
               {toast.type === 'warning' && <AlertTriangle size={18} />}
               {toast.type === 'info' && <Info size={18} />}
-              <p className="text-sm font-bold tracking-tight">{toast.message}</p>
+              <p className="text-sm font-bold tracking-tight whitespace-pre-line">{toast.message}</p>
               <button 
                 onClick={() => setToasts(prev => prev.filter(t => t.id !== toast.id))}
                 className="ml-auto p-1 hover:bg-zinc-800 rounded-lg transition-colors"
@@ -1320,6 +2298,391 @@ export default function App() {
         </AnimatePresence>
       </div>
 
+      {/* Custom Mouse-Following Tooltip */}
+      <AnimatePresence>
+        {tooltip.visible && window.innerWidth >= 768 && (
+          <motion.div
+            initial={{ opacity: 0, scale: 0.5, y: 10 }}
+            animate={{ 
+              opacity: 1, 
+              scale: 1, 
+              x: mousePos.x + 15,
+              y: mousePos.y + 15
+            }}
+            exit={{ opacity: 0, scale: 0.5, y: 10 }}
+            transition={{ type: "spring", damping: 25, stiffness: 300, mass: 0.5 }}
+            className="fixed top-0 left-0 z-[1000] pointer-events-none"
+          >
+            <div className="bg-zinc-900/80 backdrop-blur-xl border border-white/10 px-3 py-1.5 rounded-xl shadow-2xl flex items-center gap-2">
+              <div className="w-1 h-1 bg-red-500 rounded-full animate-pulse" />
+              <span className="text-[10px] font-black text-white uppercase tracking-widest whitespace-nowrap italic">
+                {tooltip.text}
+              </span>
+              {/* Refraction effect */}
+              <div className="absolute inset-0 bg-gradient-to-br from-white/10 to-transparent opacity-50 rounded-xl" />
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Sales Log Modal */}
+      <AnimatePresence>
+        {showSalesLog && (
+          <motion.div 
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            onClick={() => setShowSalesLog(false)}
+            className="fixed inset-0 z-[300] flex items-center justify-center p-4 bg-black/80 backdrop-blur-md"
+          >
+            <motion.div 
+              initial={{ scale: 0.9, y: 20, opacity: 0 }}
+              animate={{ scale: 1, y: 0, opacity: 1 }}
+              exit={{ scale: 0.9, y: 20, opacity: 0 }}
+              onClick={(e) => e.stopPropagation()}
+              className="w-full max-w-lg max-h-[90vh] overflow-y-auto bg-zinc-900 border border-red-600/30 rounded-3xl sm:rounded-[2.5rem] shadow-[0_0_50px_rgba(220,38,38,0.15)] no-scrollbar overscroll-contain"
+            >
+              <div className="p-6 sm:p-10">
+                <div className="flex items-center justify-between mb-6 sm:mb-8">
+                  <div className="flex items-center gap-3 sm:gap-4">
+                    <div className="p-2 sm:p-3 bg-red-600/10 rounded-xl sm:rounded-2xl">
+                      <Gauge size={24} className="text-red-600 sm:hidden" />
+                      <Gauge size={32} className="text-red-600 hidden sm:block" />
+                    </div>
+                    <div>
+                      <h2 className="text-xl sm:text-3xl font-black text-white uppercase tracking-tighter italic leading-none">Sales Tracker</h2>
+                      <p className="text-[10px] sm:text-sm text-zinc-500 uppercase tracking-widest font-bold mt-1 sm:mt-2">
+                        {mechanicState.mechanicName || user?.displayName || user?.username}
+                      </p>
+                    </div>
+                  </div>
+                  <button 
+                    onClick={() => setShowSalesLog(false)}
+                    className="p-2 sm:p-3 bg-zinc-800 hover:bg-red-600 text-zinc-400 hover:text-white rounded-full transition-all active:scale-90"
+                  >
+                    <X size={20} className="sm:hidden" />
+                    <X size={24} className="hidden sm:block" />
+                  </button>
+                </div>
+
+                {/* View Toggle */}
+                <div className="flex bg-zinc-950 p-1 sm:p-1.5 rounded-xl sm:rounded-2xl mb-6 sm:mb-8 border border-zinc-800">
+                  <button 
+                    onClick={() => setSalesTrackerView('totals')}
+                    className={`flex-1 py-2 sm:py-3 text-[9px] sm:text-[11px] font-black uppercase tracking-widest rounded-lg sm:rounded-xl transition-all ${salesTrackerView === 'totals' ? 'bg-red-600 text-white shadow-lg shadow-red-900/20' : 'text-zinc-500 hover:text-zinc-300'}`}
+                  >
+                    VENDAS TOTAL
+                  </button>
+                  <button 
+                    onClick={() => setSalesTrackerView('calendar')}
+                    className={`flex-1 py-2 sm:py-3 text-[9px] sm:text-[11px] font-black uppercase tracking-widest rounded-lg sm:rounded-xl transition-all ${salesTrackerView === 'calendar' ? 'bg-red-600 text-white shadow-lg shadow-red-900/20' : 'text-zinc-500 hover:text-zinc-300'}`}
+                  >
+                    VENDAS DIA/MES
+                  </button>
+                </div>
+
+                <AnimatePresence mode="wait">
+                  {salesTrackerView === 'totals' ? (
+                    <motion.div 
+                      key="totals"
+                      initial={{ opacity: 0, x: -20 }}
+                      animate={{ opacity: 1, x: 0 }}
+                      exit={{ opacity: 0, x: 20 }}
+                      className="space-y-8"
+                    >
+                      <div className="grid grid-cols-2 gap-4 sm:gap-6">
+                        <div className="bg-zinc-950/50 p-4 sm:p-6 rounded-2xl sm:rounded-[2rem] border border-zinc-800">
+                          <p className="text-[9px] sm:text-[11px] text-zinc-500 uppercase font-black tracking-widest mb-1 sm:mb-2">Total Vendas</p>
+                          <p className="text-xl sm:text-3xl font-black text-white italic">{mechanicState.salesLog?.count || 0}</p>
+                        </div>
+                        <div className="bg-zinc-950/50 p-4 sm:p-6 rounded-2xl sm:rounded-[2rem] border border-zinc-800 flex flex-col justify-center">
+                          <p className="text-[9px] sm:text-[11px] text-zinc-500 uppercase font-black tracking-widest mb-1 sm:mb-2">Valor Acumulado</p>
+                          <p className="text-base sm:text-xl font-black text-red-600 italic leading-tight">{formatCurrency(mechanicState.salesLog?.totalValue || 0)}</p>
+                        </div>
+                      </div>
+
+                      <div className="space-y-3 sm:space-y-4">
+                        <SalesLogItem icon={<Zap size={16} className="sm:hidden" />} desktopIcon={<Zap size={18} />} label="Upgrades Performance" value={mechanicState.salesLog?.upgrades || 0} />
+                        <SalesLogItem icon={<Package size={16} className="sm:hidden" />} desktopIcon={<Package size={18} />} label="Itens de Venda" value={mechanicState.salesLog?.items || 0} />
+                        <SalesLogItem icon={<Joystick size={16} className="sm:hidden" />} desktopIcon={<Joystick size={18} />} label="Itens Avulsos" value={mechanicState.salesLog?.avulsos || 0} />
+                        <SalesLogItem icon={<Truck size={16} className="sm:hidden" />} desktopIcon={<Truck size={18} />} label="Serviços & Externos" value={mechanicState.salesLog?.services || 0} />
+                      </div>
+                    </motion.div>
+                  ) : (
+                    <motion.div 
+                      key="calendar"
+                      initial={{ opacity: 0, x: 20 }}
+                      animate={{ opacity: 1, x: 0 }}
+                      exit={{ opacity: 0, x: -20 }}
+                      className="space-y-4"
+                    >
+                      <div className="flex items-center justify-between mb-2">
+                        <button 
+                          onClick={() => setCalendarDate(prev => new Date(prev.getFullYear(), prev.getMonth() - 1, 1))}
+                          className="p-1.5 sm:p-2 hover:bg-zinc-800 rounded-lg text-zinc-500 hover:text-white transition-colors"
+                        >
+                          <ChevronLeft size={14} className="sm:hidden" />
+                          <ChevronLeft size={16} className="hidden sm:block" />
+                        </button>
+                        <h3 className="text-[10px] sm:text-xs font-black text-zinc-400 uppercase tracking-widest">
+                          {new Intl.DateTimeFormat('pt-BR', { month: 'long', year: 'numeric' }).format(calendarDate)}
+                        </h3>
+                        <button 
+                          onClick={() => setCalendarDate(prev => new Date(prev.getFullYear(), prev.getMonth() + 1, 1))}
+                          className="p-1.5 sm:p-2 hover:bg-zinc-800 rounded-lg text-zinc-500 hover:text-white transition-colors"
+                        >
+                          <ChevronRight size={14} className="sm:hidden" />
+                          <ChevronRight size={16} className="hidden sm:block" />
+                        </button>
+                      </div>
+                      
+                      <div className="grid grid-cols-7 gap-1">
+                        {['D', 'S', 'T', 'Q', 'Q', 'S', 'S'].map((day, i) => (
+                          <div key={i} className="text-[8px] font-black text-zinc-600 text-center py-1">{day}</div>
+                        ))}
+                        {(() => {
+                          const year = calendarDate.getFullYear();
+                          const month = calendarDate.getMonth();
+                          const firstDay = new Date(year, month, 1).getDay();
+                          const daysInMonth = new Date(year, month + 1, 0).getDate();
+                          const today = new Date();
+                          today.setHours(0, 0, 0, 0);
+                          
+                          const cells = [];
+                          for (let i = 0; i < firstDay; i++) {
+                            cells.push(<div key={`empty-${i}`} className="aspect-square" />);
+                          }
+                          
+                          for (let d = 1; d <= daysInMonth; d++) {
+                            const date = new Date(year, month, d);
+                            const dateStr = getLocalDateString(date);
+                            const daySales = mechanicState.salesLog?.history?.[dateStr];
+                            const isToday = getLocalDateString(new Date()) === dateStr;
+                            const isFuture = date > today;
+                            const isSelected = selectedDay === dateStr;
+                            const hasSales = daySales && daySales.count > 0;
+                            
+                            cells.push(
+                              <motion.div 
+                                key={d} 
+                                whileHover={!isFuture ? { scale: 1.05 } : {}}
+                                whileTap={!isFuture ? { scale: 0.95 } : {}}
+                                onClick={() => !isFuture && setSelectedDay(isSelected ? null : dateStr)}
+                                className={`aspect-square rounded-lg border flex flex-col items-center justify-center relative group transition-all cursor-pointer ${
+                                  isFuture ? 'border-zinc-800/30 bg-zinc-950/10 opacity-40 cursor-not-allowed' :
+                                  isSelected ? 'border-red-500 bg-red-600 text-white shadow-[0_0_15px_rgba(220,38,38,0.3)]' :
+                                  isToday ? 'border-red-600 bg-red-600/20' : 
+                                  hasSales ? 'border-red-900/50 bg-red-950/20' :
+                                  'border-zinc-800 bg-zinc-950/30 hover:border-zinc-600'
+                                }`}
+                                onMouseEnter={() => !isFuture && daySales && showTooltip(`${daySales.count} vendas - ${formatCurrency(daySales.totalValue)}`)}
+                                onMouseLeave={hideTooltip}
+                              >
+                                <span className={`text-[9px] sm:text-[10px] font-bold ${isFuture ? 'text-zinc-700' : isSelected ? 'text-white' : isToday ? 'text-white' : hasSales ? 'text-red-400' : 'text-zinc-500'}`}>{d}</span>
+                                {hasSales && !isSelected && (
+                                  <div className="absolute bottom-1 w-0.5 h-0.5 sm:w-1 sm:h-1 bg-red-600 rounded-full shadow-[0_0_4px_#ef4444]" />
+                                )}
+                              </motion.div>
+                            );
+                          }
+                          return cells;
+                        })()}
+                      </div>
+                      
+                      <AnimatePresence mode="wait">
+                        {selectedDay ? (
+                          <motion.div 
+                            key="day-details"
+                            initial={{ opacity: 0, y: 10 }}
+                            animate={{ opacity: 1, y: 0 }}
+                            exit={{ opacity: 0, y: 10 }}
+                            className="bg-zinc-950/80 p-3 sm:p-4 rounded-xl sm:rounded-2xl border border-red-600/20 mt-4"
+                          >
+                            <div className="flex items-center justify-between mb-2 sm:mb-3">
+                              <p className="text-[8px] sm:text-[9px] text-zinc-500 uppercase font-black tracking-widest">
+                                Detalhes de {new Date(selectedDay + 'T00:00:00').toLocaleDateString('pt-BR')}
+                              </p>
+                              <button onClick={() => setSelectedDay(null)} className="text-zinc-600 hover:text-white">
+                                <X size={12} />
+                              </button>
+                            </div>
+                            {mechanicState.salesLog?.history?.[selectedDay] ? (
+                              <div className="grid grid-cols-2 gap-3 sm:gap-4">
+                                <div>
+                                  <p className="text-[7px] sm:text-[8px] text-zinc-600 uppercase font-bold mb-0.5 sm:mb-1">Vendas Realizadas</p>
+                                  <p className="text-base sm:text-lg font-black text-white italic">{mechanicState.salesLog.history[selectedDay].count}</p>
+                                </div>
+                                <div>
+                                  <p className="text-[7px] sm:text-[8px] text-zinc-600 uppercase font-bold mb-0.5 sm:mb-1">Faturamento</p>
+                                  <p className="text-base sm:text-lg font-black text-red-600 italic">{formatCurrency(mechanicState.salesLog.history[selectedDay].totalValue)}</p>
+                                </div>
+                                <div className="col-span-2 grid grid-cols-4 gap-1 sm:gap-2 pt-2 border-t border-zinc-800/50">
+                                  <div className="text-center">
+                                    <p className="text-[6px] sm:text-[7px] text-zinc-600 uppercase font-bold">UPG</p>
+                                    <p className="text-[10px] sm:text-xs font-black text-white">{mechanicState.salesLog.history[selectedDay].upgrades}</p>
+                                  </div>
+                                  <div className="text-center">
+                                    <p className="text-[6px] sm:text-[7px] text-zinc-600 uppercase font-bold">ITM</p>
+                                    <p className="text-[10px] sm:text-xs font-black text-white">{mechanicState.salesLog.history[selectedDay].items}</p>
+                                  </div>
+                                  <div className="text-center">
+                                    <p className="text-[6px] sm:text-[7px] text-zinc-600 uppercase font-bold">AVL</p>
+                                    <p className="text-[10px] sm:text-xs font-black text-white">{mechanicState.salesLog.history[selectedDay].avulsos}</p>
+                                  </div>
+                                  <div className="text-center">
+                                    <p className="text-[6px] sm:text-[7px] text-zinc-600 uppercase font-bold">SRV</p>
+                                    <p className="text-[10px] sm:text-xs font-black text-white">{mechanicState.salesLog.history[selectedDay].services}</p>
+                                  </div>
+                                </div>
+                              </div>
+                            ) : (
+                              <p className="text-[9px] sm:text-[10px] text-zinc-600 italic text-center py-2">Nenhuma venda registrada neste dia.</p>
+                            )}
+                          </motion.div>
+                        ) : (
+                          <motion.div 
+                            key="today-summary"
+                            initial={{ opacity: 0, y: 10 }}
+                            animate={{ opacity: 1, y: 0 }}
+                            exit={{ opacity: 0, y: 10 }}
+                            className="bg-zinc-950/50 p-3 sm:p-4 rounded-xl sm:rounded-2xl border border-zinc-800 mt-4"
+                          >
+                            <p className="text-[8px] sm:text-[9px] text-zinc-500 uppercase font-black tracking-widest mb-1 sm:mb-2">Resumo de Hoje</p>
+                            <div className="flex justify-between items-center">
+                              <span className="text-[10px] sm:text-xs font-bold text-white">{mechanicState.salesLog?.history?.[getLocalDateString(new Date())]?.count || 0} Vendas</span>
+                              <span className="text-[10px] sm:text-xs font-black text-red-500">{formatCurrency(mechanicState.salesLog?.history?.[getLocalDateString(new Date())]?.totalValue || 0)}</span>
+                            </div>
+                          </motion.div>
+                        )}
+                      </AnimatePresence>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+
+                <div className="mt-8 pt-6 border-t border-zinc-800">
+                  <button 
+                    onClick={() => {
+                      if (confirm('Tem certeza que deseja resetar todo o histórico de vendas?')) {
+                        setMechanicState((prev: any) => ({
+                          ...prev,
+                          salesLog: { upgrades: 0, items: 0, avulsos: 0, services: 0, totalValue: 0, count: 0, history: {} }
+                        }));
+                        addToast('Histórico resetado!', 'info');
+                      }
+                    }}
+                    className="w-full py-3 text-[10px] font-black text-zinc-600 hover:text-red-500 uppercase tracking-[0.2em] transition-colors flex items-center justify-center gap-2"
+                  >
+                    <Trash2 size={12} />
+                    Resetar Histórico
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Goal Modal (Master Only) */}
+      <AnimatePresence>
+        {showGoalModal && (
+          <motion.div 
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            onClick={() => setShowGoalModal(false)}
+            className="fixed inset-0 z-[400] flex items-center justify-center p-4 bg-black/90 backdrop-blur-xl"
+          >
+            <motion.div 
+              initial={{ scale: 0.9, y: 20, opacity: 0 }}
+              animate={{ scale: 1, y: 0, opacity: 1 }}
+              exit={{ scale: 0.9, y: 20, opacity: 0 }}
+              onClick={(e) => e.stopPropagation()}
+              className="w-full max-w-sm max-h-[90vh] overflow-y-auto bg-zinc-900 border border-yellow-500/30 rounded-[2rem] shadow-[0_0_50px_rgba(234,179,8,0.1)] no-scrollbar overscroll-contain"
+            >
+              <div className="p-8">
+                <div className="flex items-center justify-between mb-6">
+                  <div className="flex items-center gap-3">
+                    <div className="p-2 bg-yellow-500/10 rounded-xl">
+                      <Target size={24} className="text-yellow-500" />
+                    </div>
+                    <h2 className="text-xl font-black text-white uppercase tracking-tighter italic">Set Goals</h2>
+                  </div>
+                  <button onClick={() => setShowGoalModal(false)} className="text-zinc-500 hover:text-white">
+                    <X size={20} />
+                  </button>
+                </div>
+
+                <div className="space-y-4">
+                  <div>
+                    <label className="text-[10px] font-black text-zinc-500 uppercase tracking-widest mb-1.5 block">Meta Financeira ($)</label>
+                    <input 
+                      type="number"
+                      value={tempGoals.money}
+                      onChange={(e) => setTempGoals(prev => ({ ...prev, money: parseInt(e.target.value) || 0 }))}
+                      className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-3 text-white font-bold focus:ring-2 focus:ring-yellow-500 focus:outline-none transition-all"
+                    />
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                    <div>
+                      <label className="text-[10px] font-black text-zinc-500 uppercase tracking-widest mb-1.5 block">Meta Diária</label>
+                      <input 
+                        type="number"
+                        value={tempGoals.dailyItems}
+                        onChange={(e) => setTempGoals(prev => ({ ...prev, dailyItems: parseInt(e.target.value) || 0 }))}
+                        className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-3 text-white font-bold focus:ring-2 focus:ring-yellow-500 focus:outline-none transition-all"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-[10px] font-black text-zinc-500 uppercase tracking-widest mb-1.5 block">Meta Semanal</label>
+                      <input 
+                        type="number"
+                        value={tempGoals.weeklyItems}
+                        onChange={(e) => setTempGoals(prev => ({ ...prev, weeklyItems: parseInt(e.target.value) || 0 }))}
+                        className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-3 text-white font-bold focus:ring-2 focus:ring-yellow-500 focus:outline-none transition-all"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-[10px] font-black text-zinc-500 uppercase tracking-widest mb-1.5 block">Meta Mensal</label>
+                      <input 
+                        type="number"
+                        value={tempGoals.monthlyItems}
+                        onChange={(e) => setTempGoals(prev => ({ ...prev, monthlyItems: parseInt(e.target.value) || 0 }))}
+                        className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-3 text-white font-bold focus:ring-2 focus:ring-yellow-500 focus:outline-none transition-all"
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                <div className="mt-8 space-y-3">
+                  <button 
+                    onClick={() => {
+                      setGoals(tempGoals);
+                      setShowGoalModal(false);
+                      addToast('Metas atualizadas com sucesso!', 'success');
+                    }}
+                    className="w-full bg-yellow-500 hover:bg-yellow-600 text-black py-4 rounded-2xl font-black uppercase tracking-widest text-xs shadow-lg shadow-yellow-900/20 transition-all active:scale-95"
+                  >
+                    Salvar Metas
+                  </button>
+                  <button 
+                    onClick={() => {
+                      const defaults = { money: 15000, dailyItems: 100, weeklyItems: 600, monthlyItems: 2400 };
+                      setGoals(defaults);
+                      setTempGoals(defaults);
+                      setShowGoalModal(false);
+                      addToast('Metas resetadas para o padrão!', 'info');
+                    }}
+                    className="w-full bg-zinc-800 hover:bg-zinc-700 text-zinc-300 py-3 rounded-2xl font-black uppercase tracking-widest text-[10px] transition-all"
+                  >
+                    Resetar para Padrão
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {/* Tutorial Overlay */}
       <AnimatePresence>
         {showTutorial && (
@@ -1329,7 +2692,7 @@ export default function App() {
             exit={{ opacity: 0 }}
             className="fixed inset-0 z-[250] pointer-events-none"
           >
-            {/* Spotlight Effect */}
+            {/* Spotlight & Highlight (Universal) */}
             <svg className="absolute inset-0 w-full h-full pointer-events-none">
               <defs>
                 <mask id="spotlight-mask">
@@ -1341,7 +2704,7 @@ export default function App() {
                       width: (tutorialPosition.width || 0) > 0 ? (tutorialPosition.width || 0) + 24 : 100,
                       height: (tutorialPosition.width || 0) > 0 ? (tutorialPosition.height || 0) + 24 : 100,
                     }}
-                    transition={{ type: "spring", damping: 50, stiffness: 80 }}
+                    transition={{ type: "spring", damping: 45, stiffness: 90 }}
                     rx="20" 
                     fill="black" 
                   />
@@ -1350,7 +2713,6 @@ export default function App() {
               <rect x="0" y="0" width="100%" height="100%" fill="rgba(0,0,0,0.85)" mask="url(#spotlight-mask)" />
             </svg>
 
-            {/* Glowing Highlight */}
             <motion.div 
               animate={{
                 top: (tutorialPosition.width || 0) > 0 ? (tutorialPosition.top || 0) - 12 : window.innerHeight / 2 - 50,
@@ -1361,10 +2723,10 @@ export default function App() {
                 scale: [1, 1.02, 1]
               }}
               transition={{ 
-                top: { type: "spring", damping: 50, stiffness: 80 },
-                left: { type: "spring", damping: 50, stiffness: 80 },
-                width: { type: "spring", damping: 50, stiffness: 80 },
-                height: { type: "spring", damping: 50, stiffness: 80 },
+                top: { type: "spring", damping: 45, stiffness: 90 },
+                left: { type: "spring", damping: 45, stiffness: 90 },
+                width: { type: "spring", damping: 45, stiffness: 90 },
+                height: { type: "spring", damping: 45, stiffness: 90 },
                 scale: { duration: 3, repeat: Infinity, ease: "easeInOut" }
               }}
               className="absolute border-2 border-red-600 rounded-3xl shadow-[0_0_50px_rgba(220,38,38,0.6)] pointer-events-none z-[255]"
@@ -1372,16 +2734,27 @@ export default function App() {
 
             {/* Tutorial Box */}
             <motion.div 
-              initial={{ opacity: 0, scale: 0.8 }}
-              animate={{ 
+              initial={{ opacity: 0, scale: 0.9, y: 20 }}
+              animate={window.innerWidth < 768 ? { 
+                opacity: 1, 
+                scale: 1, 
+                top: tutorialPosition.width > 0 
+                  ? (tutorialPosition.top + tutorialPosition.height + 20 > window.innerHeight - 300
+                      ? Math.max(20, tutorialPosition.top - 320)
+                      : tutorialPosition.top + tutorialPosition.height + 20)
+                  : window.innerHeight / 2 - 150,
+                left: tutorialPosition.width > 0
+                  ? Math.max(20, Math.min(window.innerWidth - 300, tutorialPosition.left + (tutorialPosition.width / 2) - 140))
+                  : window.innerWidth / 2 - 140,
+                y: 0 
+              } : {
                 opacity: 1, 
                 scale: 1,
-                // Position tutorial box dynamically and keep it inside window
                 top: tutorialPosition.width > 0 
                   ? (tutorialPosition.height > window.innerHeight * 0.8
-                      ? window.innerHeight / 2 - 150 // If element is too big, center box
+                      ? window.innerHeight / 2 - 150 
                       : (tutorialPosition.width > window.innerWidth * 0.6
-                          ? (tutorialPosition.top < 100 // If it's at the top (like header)
+                          ? (tutorialPosition.top < 100 
                               ? tutorialPosition.top + tutorialPosition.height + 60
                               : (tutorialPosition.top + tutorialPosition.height + 80 > window.innerHeight - 320
                                   ? Math.max(20, tutorialPosition.top - 360)
@@ -1390,20 +2763,20 @@ export default function App() {
                   : window.innerHeight / 2 - 150,
                 left: tutorialPosition.width > 0
                   ? (tutorialPosition.width > window.innerWidth * 0.6
-                      ? Math.max(20, Math.min(window.innerWidth - 340, (window.innerWidth / 2) - 160)) // Center horizontally for wide elements
+                      ? Math.max(20, Math.min(window.innerWidth - 340, (window.innerWidth / 2) - 160)) 
                       : (tutorialPosition.left + (tutorialPosition.width / 2) > window.innerWidth / 2
-                          ? Math.max(20, tutorialPosition.left - 340) // Place to the left of the element
-                          : Math.max(20, Math.min(window.innerWidth - 340, tutorialPosition.left + tutorialPosition.width + 20)))) // Place to the right
-                  : window.innerWidth / 2 - 160
+                          ? Math.max(20, tutorialPosition.left - 340) 
+                          : Math.max(20, Math.min(window.innerWidth - 340, tutorialPosition.left + tutorialPosition.width + 20)))) 
+                  : window.innerWidth / 2 - 160,
+                y: 0
               }}
-              whileHover={{ y: -5 }}
+              exit={{ opacity: 0, scale: 0.9, y: 20 }}
               transition={{ 
-                top: { type: "spring", damping: 50, stiffness: 80 },
-                left: { type: "spring", damping: 50, stiffness: 80 },
-                scale: { type: "spring", damping: 25, stiffness: 150 },
-                y: { duration: 3, repeat: Infinity, repeatType: "reverse", ease: "easeInOut" }
+                type: "spring", 
+                damping: 45, 
+                stiffness: 90 
               }}
-              className="fixed z-[260] w-[320px] bg-zinc-900 border border-zinc-800 p-8 rounded-[2.5rem] shadow-2xl pointer-events-auto"
+              className={`z-[260] w-full max-w-[280px] bg-zinc-900 border border-red-600/30 p-6 rounded-[2rem] shadow-[0_0_30px_rgba(220,38,38,0.15)] overflow-hidden pointer-events-auto fixed`}
             >
               <div className="absolute top-0 left-0 w-full h-1 bg-zinc-800">
                 <motion.div 
@@ -1413,29 +2786,27 @@ export default function App() {
                 />
               </div>
 
-              <div className="flex items-center justify-between mb-4">
-                <div className="p-2 bg-red-600/10 rounded-xl">
-                  <Wrench className="text-red-600" size={18} />
-                </div>
-                <span className="text-[9px] font-black text-zinc-600 uppercase tracking-widest">
-                  {tutorialStep + 1} / {tutorialSteps.length}
+              <div className="flex items-center justify-between mb-4 mt-2">
+                <span className="text-[10px] font-black text-white uppercase tracking-widest italic">
+                  Passo <span className="text-red-600">{tutorialStep + 1}</span> de <span className="text-red-600">{tutorialSteps.length}</span>
                 </span>
               </div>
 
-              <h2 className="text-lg font-black text-white uppercase italic tracking-tighter mb-2">
+              <h3 className="text-lg font-black text-white uppercase tracking-tighter italic mb-2">
                 {tutorialSteps[tutorialStep].title}
-              </h2>
-              <p className="text-zinc-400 text-xs leading-relaxed mb-6">
+              </h3>
+              
+              <p className="text-xs text-zinc-400 leading-relaxed mb-6">
                 {tutorialSteps[tutorialStep].content}
               </p>
 
-              <div className="flex gap-2">
+              <div className="flex items-center gap-2">
                 {tutorialStep > 0 && (
                   <button 
                     onClick={() => setTutorialStep(prev => prev - 1)}
-                    className="flex-1 px-4 py-2 rounded-xl border border-zinc-800 text-zinc-400 font-bold text-[10px] hover:bg-zinc-800 transition-colors"
+                    className="flex-1 bg-zinc-800 hover:bg-zinc-700 text-white py-2.5 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all active:scale-95"
                   >
-                    VOLTAR
+                    Voltar
                   </button>
                 )}
                 <button 
@@ -1446,35 +2817,55 @@ export default function App() {
                       closeTutorial();
                     }
                   }}
-                  className="flex-[2] bg-red-600 hover:bg-red-500 text-white font-black py-2 rounded-xl text-[10px] transition-all active:scale-95"
+                  className="flex-[2] bg-red-600 hover:bg-red-500 text-white py-2.5 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all active:scale-95 shadow-lg shadow-red-900/20"
                 >
-                  {tutorialStep === tutorialSteps.length - 1 ? "ENTENDIDO!" : "PRÓXIMO"}
+                  {tutorialStep < tutorialSteps.length - 1 ? 'Próximo' : 'Entendido!'}
                 </button>
               </div>
 
               <button 
                 onClick={closeTutorial}
-                className="absolute top-4 right-4 text-zinc-600 hover:text-white transition-colors"
+                className="absolute top-4 right-4 p-2 text-zinc-400 hover:text-white transition-all active:scale-90 group"
+                title="Pular Tutorial"
               >
-                <X size={16} />
+                <motion.div
+                  animate={{ 
+                    filter: [
+                      "drop-shadow(0 0 2px rgba(220,38,38,0))", 
+                      "drop-shadow(0 0 12px rgba(220,38,38,0.9))", 
+                      "drop-shadow(0 0 2px rgba(220,38,38,0))"
+                    ],
+                    scale: [1, 1.1, 1]
+                  }}
+                  transition={{ 
+                    duration: 1.5, 
+                    repeat: Infinity, 
+                    ease: "easeInOut" 
+                  }}
+                >
+                  <X size={20} className="group-hover:text-red-500 transition-colors" />
+                </motion.div>
               </button>
             </motion.div>
           </motion.div>
         )}
       </AnimatePresence>
     </div>
+    </TooltipContext.Provider>
   );
 }
 
 // --- Sub-components ---
 
-function UpgradeCard({ icon, title, price, value, onChange }: { 
+function UpgradeCard({ icon, title, price, value, onChange, max = 5 }: { 
   icon: ReactNode, 
   title: string, 
   price: number, 
   value: number, 
-  onChange: (v: number) => void 
+  onChange: (v: number) => void,
+  max?: number
 }) {
+  const { showTooltip, hideTooltip } = useTooltip();
   const formatCurrency = (val: number) => {
     return new Intl.NumberFormat('pt-BR', { 
       style: 'currency', 
@@ -1484,7 +2875,11 @@ function UpgradeCard({ icon, title, price, value, onChange }: {
   };
   
   return (
-    <div className="bg-zinc-900/40 backdrop-blur-md border border-zinc-800 p-5 rounded-2xl space-y-4 hover:border-red-900/50 transition-all h-full flex flex-col justify-between relative overflow-hidden group">
+    <div 
+      className="bg-zinc-900/40 backdrop-blur-md border border-zinc-800 p-5 rounded-2xl space-y-4 hover:border-red-900/50 transition-all h-full flex flex-col justify-between relative overflow-hidden group active:scale-[0.97]"
+      onMouseEnter={() => showTooltip(`Ajustar nível de ${title}`)}
+      onMouseLeave={hideTooltip}
+    >
       {/* Refraction effect */}
       <div className="absolute inset-0 bg-gradient-to-br from-white/5 to-transparent opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none" />
       
@@ -1506,10 +2901,10 @@ function UpgradeCard({ icon, title, price, value, onChange }: {
       <div className="space-y-3">
         <div className="flex justify-between text-[10px] font-black text-zinc-600 uppercase tracking-widest">
           <span>Nível {value}</span>
-          <span>Máx Nível 4</span>
+          <span>Máx Nível {max}</span>
         </div>
         <input 
-          type="range" min="0" max="4" step="1" 
+          type="range" min="0" max={max} step="1" 
           className="w-full h-2 bg-zinc-800 rounded-lg appearance-none cursor-pointer"
           value={value}
           onChange={(e) => onChange(parseInt(e.target.value))}
@@ -1528,6 +2923,7 @@ function ItemCounter({ title, price, count, limit, onAdd, onSub, hideLimit }: {
   onSub: () => void,
   hideLimit?: boolean
 }) {
+  const { showTooltip, hideTooltip } = useTooltip();
   const formatCurrency = (val: number) => {
     return new Intl.NumberFormat('pt-BR', { 
       style: 'currency', 
@@ -1537,7 +2933,11 @@ function ItemCounter({ title, price, count, limit, onAdd, onSub, hideLimit }: {
   };
 
   return (
-    <div className="bg-zinc-900/40 backdrop-blur-md border border-zinc-800 p-4 rounded-2xl flex items-center justify-between hover:border-red-900/50 transition-all relative overflow-hidden group">
+    <div 
+      className="bg-zinc-900/40 backdrop-blur-md border border-zinc-800 p-4 rounded-2xl flex items-center justify-between hover:border-red-900/50 transition-all relative overflow-hidden group active:scale-[0.97]"
+      onMouseEnter={() => showTooltip(`Quantidade de ${title}`)}
+      onMouseLeave={hideTooltip}
+    >
       {/* Refraction effect */}
       <div className="absolute inset-0 bg-gradient-to-br from-white/5 to-transparent opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none" />
       
@@ -1566,7 +2966,7 @@ function ItemCounter({ title, price, count, limit, onAdd, onSub, hideLimit }: {
           <button 
             onClick={onSub}
             disabled={count <= 0}
-            className="p-2 hover:bg-zinc-700 rounded-lg text-zinc-400 disabled:opacity-30 transition-colors"
+            className="p-3 sm:p-2 hover:bg-zinc-700 rounded-lg text-zinc-400 disabled:opacity-30 transition-all active:scale-90"
           >
             <Minus size={14} />
           </button>
@@ -1587,7 +2987,7 @@ function ItemCounter({ title, price, count, limit, onAdd, onSub, hideLimit }: {
           <button 
             onClick={onAdd}
             disabled={count >= limit}
-            className="p-2 hover:bg-zinc-700 rounded-lg text-red-500 disabled:opacity-30 transition-colors"
+            className="p-3 sm:p-2 hover:bg-zinc-700 rounded-lg text-red-500 disabled:opacity-30 transition-all active:scale-90"
           >
             <Plus size={14} />
           </button>
@@ -1603,6 +3003,7 @@ function CheckboxField({ label, price, checked, onChange }: {
   checked: boolean,
   onChange: (v: boolean) => void
 }) {
+  const { showTooltip, hideTooltip } = useTooltip();
   const formatCurrency = (val: number) => {
     return new Intl.NumberFormat('pt-BR', { 
       style: 'currency', 
@@ -1612,7 +3013,11 @@ function CheckboxField({ label, price, checked, onChange }: {
   };
 
   return (
-    <label className="flex items-center justify-between p-3 bg-zinc-800/50 rounded-xl border border-transparent hover:border-zinc-700 transition-all cursor-pointer group">
+    <label 
+      className="flex items-center justify-between p-4 sm:p-3 bg-zinc-800/50 rounded-xl border border-transparent hover:border-zinc-700 transition-all cursor-pointer group active:scale-[0.97]"
+      onMouseEnter={() => showTooltip(`${checked ? 'Remover' : 'Adicionar'} ${label}`)}
+      onMouseLeave={hideTooltip}
+    >
       <div className="flex items-center gap-3">
         <div className={`w-5 h-5 rounded border-2 flex items-center justify-center transition-all ${checked ? 'bg-red-600 border-red-600' : 'border-zinc-600 group-hover:border-zinc-500'}`}>
           {checked && <Plus size={12} className="text-white" strokeWidth={4} />}
@@ -1630,7 +3035,32 @@ function CheckboxField({ label, price, checked, onChange }: {
   );
 }
 
+function SalesLogItem({ icon, desktopIcon, label, value }: { icon: ReactNode, desktopIcon?: ReactNode, label: string, value: number }) {
+  const { showTooltip, hideTooltip } = useTooltip();
+  return (
+    <div 
+      className="flex items-center justify-between p-3 sm:p-4 bg-zinc-950/30 rounded-xl sm:rounded-2xl border border-zinc-800/30"
+      onMouseEnter={() => showTooltip(`Total de ${label}`)}
+      onMouseLeave={hideTooltip}
+    >
+      <div className="flex items-center gap-3 sm:gap-4">
+        <div className="text-red-600">
+          {desktopIcon ? (
+            <>
+              <span className="sm:hidden">{icon}</span>
+              <span className="hidden sm:block">{desktopIcon}</span>
+            </>
+          ) : icon}
+        </div>
+        <span className="text-[10px] sm:text-xs font-bold text-zinc-400 uppercase tracking-widest">{label}</span>
+      </div>
+      <span className="text-sm sm:text-base font-black text-white tabular-nums">{value}</span>
+    </div>
+  );
+}
+
 function SummaryRow({ label, value }: { label: string, value: number }) {
+  const { showTooltip, hideTooltip } = useTooltip();
   const formatCurrency = (val: number) => {
     return new Intl.NumberFormat('pt-BR', { 
       style: 'currency', 
@@ -1639,9 +3069,13 @@ function SummaryRow({ label, value }: { label: string, value: number }) {
     }).format(val).replace('US$', '$');
   };
   return (
-    <div className="flex justify-between items-center">
-      <span className="text-zinc-500 text-sm font-medium">{label}</span>
-      <span className="text-zinc-200 font-bold">{formatCurrency(value)}</span>
+    <div 
+      className="flex justify-between items-center py-1 sm:py-0"
+      onMouseEnter={() => showTooltip(`Valor de ${label}`)}
+      onMouseLeave={hideTooltip}
+    >
+      <span className="text-zinc-500 text-xs sm:text-sm font-medium">{label}</span>
+      <span className="text-zinc-200 text-sm sm:text-base font-black tabular-nums">{formatCurrency(value)}</span>
     </div>
   );
 }

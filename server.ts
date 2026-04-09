@@ -11,76 +11,75 @@ dotenv.config();
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-async function startServer() {
-  const app = express();
-  const PORT = 3000;
+const app = express();
+const PORT = 3000;
 
-  app.use(express.json());
-  app.use(cookieParser());
+app.use(express.json());
+app.use(cookieParser());
 
-  // --- Discord OAuth Config ---
-  const CLIENT_ID = process.env.DISCORD_CLIENT_ID;
-  const CLIENT_SECRET = process.env.DISCORD_CLIENT_SECRET;
-  const APP_URL = process.env.APP_URL || `http://localhost:${PORT}`;
-  const REDIRECT_URI = `${APP_URL}/auth/callback`;
-  
-  // Summer Garage Specific IDs
-  const GUILD_ID = '1302155819432939600'; // ID do Servidor Summer Garage
-  const GOALS_CHANNEL_ID = '1302155820221337603'; // ID do Canal de Metas
-  const ANNOUNCEMENTS_CHANNEL_ID = '1302155820057886800'; // ID do Canal de Anúncios
+// --- Discord OAuth Config ---
+const CLIENT_ID = process.env.DISCORD_CLIENT_ID;
+const CLIENT_SECRET = process.env.DISCORD_CLIENT_SECRET;
+const APP_URL = process.env.APP_URL || `http://localhost:${PORT}`;
+const REDIRECT_URI = `${APP_URL}/auth/callback`;
 
-  const BOT_TOKEN = process.env.DISCORD_BOT_TOKEN;
+// Summer Garage Specific IDs
+const GUILD_ID = '1302155819432939600'; // ID do Servidor Summer Garage
+const GOALS_CHANNEL_ID = '1302155820221337603'; // ID do Canal de Metas
+const ANNOUNCEMENTS_CHANNEL_ID = '1302155820057886800'; // ID do Canal de Anúncios
 
-  // Cache for roles to avoid excessive API calls
-  let guildRolesCache: Record<string, string> = {};
+const BOT_TOKEN = process.env.DISCORD_BOT_TOKEN;
 
-  async function fetchGuildRoles() {
-    if (!BOT_TOKEN || !GUILD_ID) return;
-    try {
-      console.log(`Fetching roles for guild: ${GUILD_ID}`);
-      const response = await axios.get(`https://discord.com/api/v10/guilds/${GUILD_ID}/roles`, {
-        headers: { Authorization: `Bot ${BOT_TOKEN}` },
-      });
-      const roles = response.data;
-      const mapping: Record<string, string> = {};
-      roles.forEach((role: any) => {
-        mapping[role.id] = role.name;
-      });
-      guildRolesCache = mapping;
-      console.log(`Successfully cached ${roles.length} roles for guild ${GUILD_ID}`);
-    } catch (error: any) {
-      if (error.response) {
-        console.error(`Error fetching guild roles (Status ${error.response.status}):`, error.response.data);
-        if (error.response.status === 404) {
-          console.error('TIP: Check if GUILD_ID is correct and if the Bot is actually in the server.');
-        }
-      } else {
-        console.error('Error fetching guild roles:', error.message);
+// Cache for roles to avoid excessive API calls
+let guildRolesCache: Record<string, string> = {};
+
+async function fetchGuildRoles() {
+  if (!BOT_TOKEN || !GUILD_ID) return;
+  try {
+    console.log(`Fetching roles for guild: ${GUILD_ID}`);
+    const response = await axios.get(`https://discord.com/api/v10/guilds/${GUILD_ID}/roles`, {
+      headers: { Authorization: `Bot ${BOT_TOKEN}` },
+    });
+    const roles = response.data;
+    const mapping: Record<string, string> = {};
+    roles.forEach((role: any) => {
+      mapping[role.id] = role.name;
+    });
+    guildRolesCache = mapping;
+    console.log(`Successfully cached ${roles.length} roles for guild ${GUILD_ID}`);
+  } catch (error: any) {
+    if (error.response) {
+      console.error(`Error fetching guild roles (Status ${error.response.status}):`, error.response.data);
+      if (error.response.status === 404) {
+        console.error('TIP: Check if GUILD_ID is correct and if the Bot is actually in the server.');
       }
+    } else {
+      console.error('Error fetching guild roles:', error.message);
     }
   }
+}
 
-  // Initial fetch
-  fetchGuildRoles();
+// Initial fetch
+fetchGuildRoles();
 
-  // Function to fetch latest goals from Discord channel
-  async function fetchLatestGoals() {
-    if (!BOT_TOKEN || !GOALS_CHANNEL_ID) return null;
-    try {
-      const response = await axios.get(`https://discord.com/api/v10/channels/${GOALS_CHANNEL_ID}/messages?limit=1`, {
-        headers: { Authorization: `Bot ${BOT_TOKEN}` },
-      });
-      const messages = response.data;
-      if (messages.length > 0) {
-        return messages[0].content;
-      }
-    } catch (error: any) {
-      console.error('Error fetching latest goals:', error.response?.data || error.message);
+// Function to fetch latest goals from Discord channel
+async function fetchLatestGoals() {
+  if (!BOT_TOKEN || !GOALS_CHANNEL_ID) return null;
+  try {
+    const response = await axios.get(`https://discord.com/api/v10/channels/${GOALS_CHANNEL_ID}/messages?limit=1`, {
+      headers: { Authorization: `Bot ${BOT_TOKEN}` },
+    });
+    const messages = response.data;
+    if (messages.length > 0) {
+      return messages[0].content;
     }
-    return null;
+  } catch (error: any) {
+    console.error('Error fetching latest goals:', error.response?.data || error.message);
   }
+  return null;
+}
 
-  // --- API Routes ---
+// --- API Routes ---
 
   // Get goals from Discord
   app.get('/api/goals', async (req, res) => {
@@ -88,8 +87,8 @@ async function startServer() {
     // Default values based on user prints
     const goals = {
       money: 15000,
-      dailyItems: 100,
-      weeklyItems: 600,
+      dailyItems: 600,
+      weeklyItems: 3600,
       rawContent: content
     };
     
@@ -292,7 +291,7 @@ async function startServer() {
               }
             </style>
           </head>
-          <body>
+          <body style="background-color: #09090b;">
             <div class="container">
               <div class="icon-wrapper">
                 <div class="spinner"></div>
@@ -363,9 +362,526 @@ async function startServer() {
     res.json({ success: true });
   });
 
+  // --- Debug / Error Reporting ---
+  const MASTER_ID = '1357838586501664849';
+  let globalState = {
+    maintenance: false,
+    broadcast: '',
+    errorLogs: [] as any[],
+    staff: {
+      [MASTER_ID]: 'admin'
+    } as Record<string, 'admin' | 'manager'>
+  };
+
+  // Discord Bot Client for Commands
+  if (BOT_TOKEN) {
+    const { 
+      Client, 
+      GatewayIntentBits, 
+      EmbedBuilder, 
+      Partials, 
+      ActionRowBuilder, 
+      StringSelectMenuBuilder, 
+      ButtonBuilder, 
+      ButtonStyle,
+      ModalBuilder,
+      TextInputBuilder,
+      TextInputStyle,
+      Events
+    } = await import('discord.js');
+
+    const client = new Client({ 
+      intents: [
+        GatewayIntentBits.DirectMessages,
+        GatewayIntentBits.GuildMessages,
+        GatewayIntentBits.MessageContent,
+        GatewayIntentBits.GuildMembers,
+        GatewayIntentBits.Guilds
+      ],
+      partials: [Partials.Channel, Partials.GuildMember, Partials.User]
+    });
+
+    const isStaff = (userId: string, level: 'admin' | 'manager' = 'manager') => {
+      if (userId === MASTER_ID) return true;
+      const userRole = globalState.staff[userId];
+      if (!userRole) return false;
+      if (level === 'admin') return userRole === 'admin';
+      return true;
+    };
+
+    const logToStaff = async (embed: any) => {
+      const staffIds = Object.keys(globalState.staff);
+      for (const id of staffIds) {
+        try {
+          const user = await client.users.fetch(id);
+          await user.send({ embeds: [embed] });
+        } catch (e) {
+          console.error(`Failed to log to staff member ${id}:`, e);
+        }
+      }
+    };
+
+    client.on('ready', () => {
+      console.log(`Logged in as ${client.user?.tag}!`);
+    });
+
+    // Interaction Handler (Buttons, Menus, Modals)
+    client.on(Events.InteractionCreate, async (interaction) => {
+      if (!isStaff(interaction.user.id)) return;
+
+      // Handle Dropdown Selection
+      if (interaction.isStringSelectMenu()) {
+        if (interaction.customId === 'staff_panel_menu') {
+          const selection = interaction.values[0];
+          
+          switch (selection) {
+            case 'warn_member':
+              const warnModal = new ModalBuilder()
+                .setCustomId('modal_warn')
+                .setTitle('⚠️ Aplicar Advertência');
+
+              const warnUserId = new TextInputBuilder()
+                .setCustomId('warn_user_id')
+                .setLabel('ID do Usuário')
+                .setPlaceholder('Ex: 123456789012345678')
+                .setStyle(TextInputStyle.Short)
+                .setRequired(true);
+
+              const warnStrike = new TextInputBuilder()
+                .setCustomId('warn_strike')
+                .setLabel('Strike (1, 2 ou 3)')
+                .setPlaceholder('Digite apenas o número')
+                .setStyle(TextInputStyle.Short)
+                .setRequired(true);
+
+              const warnReason = new TextInputBuilder()
+                .setCustomId('warn_reason')
+                .setLabel('Motivo da Punição')
+                .setStyle(TextInputStyle.Paragraph)
+                .setRequired(true);
+
+              warnModal.addComponents(
+                new ActionRowBuilder<any>().addComponents(warnUserId),
+                new ActionRowBuilder<any>().addComponents(warnStrike),
+                new ActionRowBuilder<any>().addComponents(warnReason)
+              );
+
+              await interaction.showModal(warnModal);
+              break;
+
+            case 'send_announcement':
+              const announceModal = new ModalBuilder()
+                .setCustomId('modal_announce')
+                .setTitle('📢 Novo Anúncio Oficial');
+
+              const announceTitle = new TextInputBuilder()
+                .setCustomId('announce_title')
+                .setLabel('Título do Anúncio')
+                .setStyle(TextInputStyle.Short)
+                .setRequired(true);
+
+              const announceMsg = new TextInputBuilder()
+                .setCustomId('announce_msg')
+                .setLabel('Mensagem')
+                .setStyle(TextInputStyle.Paragraph)
+                .setRequired(true);
+
+              announceModal.addComponents(
+                new ActionRowBuilder<any>().addComponents(announceTitle),
+                new ActionRowBuilder<any>().addComponents(announceMsg)
+              );
+
+              await interaction.showModal(announceModal);
+              break;
+
+            case 'send_pm':
+              const pmModal = new ModalBuilder()
+                .setCustomId('modal_pm')
+                .setTitle('📩 Enviar Mensagem Privada');
+
+              const pmUserId = new TextInputBuilder()
+                .setCustomId('pm_user_id')
+                .setLabel('ID do Usuário')
+                .setStyle(TextInputStyle.Short)
+                .setRequired(true);
+
+              const pmTitle = new TextInputBuilder()
+                .setCustomId('pm_title')
+                .setLabel('Título')
+                .setStyle(TextInputStyle.Short)
+                .setRequired(true);
+
+              const pmMsg = new TextInputBuilder()
+                .setCustomId('pm_msg')
+                .setLabel('Mensagem')
+                .setStyle(TextInputStyle.Paragraph)
+                .setRequired(true);
+
+              pmModal.addComponents(
+                new ActionRowBuilder<any>().addComponents(pmUserId),
+                new ActionRowBuilder<any>().addComponents(pmTitle),
+                new ActionRowBuilder<any>().addComponents(pmMsg)
+              );
+
+              await interaction.showModal(pmModal);
+              break;
+
+            case 'app_stats':
+              const statsEmbed = new EmbedBuilder()
+                .setTitle('📊 Estatísticas do Sistema')
+                .setColor(0x5865F2)
+                .addFields(
+                  { name: 'Manutenção', value: globalState.maintenance ? '🔴 Ativada' : '🟢 Desativada', inline: true },
+                  { name: 'Aviso Ativo', value: globalState.broadcast || 'Nenhum', inline: true },
+                  { name: 'Logs de Erro', value: `${globalState.errorLogs.length}`, inline: true },
+                  { name: 'Staff Ativa', value: `${Object.keys(globalState.staff).length} membros`, inline: true }
+                );
+              await interaction.reply({ embeds: [statsEmbed], ephemeral: true });
+              break;
+          }
+        }
+      }
+
+      // Handle Modal Submissions
+      if (interaction.isModalSubmit()) {
+        await interaction.deferReply({ ephemeral: true });
+
+        try {
+          if (interaction.customId === 'modal_warn') {
+            const userId = interaction.fields.getTextInputValue('warn_user_id');
+            const strike = interaction.fields.getTextInputValue('warn_strike');
+            const reason = interaction.fields.getTextInputValue('warn_reason');
+
+            const strikeEmoji = strike === '1' ? '⚠️' : strike === '2' ? '‼️' : '🚫';
+            const warnTitle = `${strikeEmoji} ADVERTÊNCIA STRIKE ${strike} - Summer Garage`;
+            
+            const pmEmbed = new EmbedBuilder()
+              .setTitle(warnTitle)
+              .setDescription(`**Motivo:** ${reason}\n\n*Este é o seu strike ${strike}/3. O descumprimento das regras poderá resultar em desligamento imediato.*`)
+              .setColor(0xef4444)
+              .setTimestamp()
+              .setFooter({ text: 'Summer Garage • Sistema de Disciplina' });
+
+            const targetUser = await client.users.fetch(userId);
+            await targetUser.send({ embeds: [pmEmbed] });
+
+            // Try to assign role if in guild
+            if (GUILD_ID) {
+              try {
+                const guild = await client.guilds.fetch(GUILD_ID);
+                const member = await guild.members.fetch(userId);
+                const warnRole = guild.roles.cache.find(r => r.name.toLowerCase().includes('warn'));
+                if (warnRole) {
+                  await member.roles.add(warnRole);
+                }
+              } catch (e) {
+                console.log('Could not assign role (user not in guild or role not found)');
+              }
+            }
+
+            const logEmbed = new EmbedBuilder()
+              .setTitle('🚨 Log de Punição')
+              .setColor(0xef4444)
+              .addFields(
+                { name: 'Infrator', value: `<@${userId}> (${userId})`, inline: true },
+                { name: 'Staff', value: `<@${interaction.user.id}>`, inline: true },
+                { name: 'Strike', value: `${strike}/3`, inline: true },
+                { name: 'Motivo', value: reason }
+              )
+              .setTimestamp();
+
+            await logToStaff(logEmbed);
+            await interaction.editReply(`✅ Advertência Strike ${strike} aplicada com sucesso!`);
+          }
+
+          if (interaction.customId === 'modal_announce') {
+            const title = interaction.fields.getTextInputValue('announce_title');
+            const msg = interaction.fields.getTextInputValue('announce_msg');
+
+            const embed = new EmbedBuilder()
+              .setTitle(title)
+              .setDescription(msg)
+              .setColor(0xef4444)
+              .setTimestamp()
+              .setFooter({ text: 'Summer Garage • Informativo Oficial' });
+
+            const channel = await client.channels.fetch(ANNOUNCEMENTS_CHANNEL_ID) as any;
+            await channel.send({ embeds: [embed] });
+            await interaction.editReply(`✅ Anúncio enviado para <#${ANNOUNCEMENTS_CHANNEL_ID}>!`);
+          }
+
+          if (interaction.customId === 'modal_pm') {
+            const userId = interaction.fields.getTextInputValue('pm_user_id');
+            const title = interaction.fields.getTextInputValue('pm_title');
+            const msg = interaction.fields.getTextInputValue('pm_msg');
+
+            const embed = new EmbedBuilder()
+              .setTitle(title)
+              .setDescription(msg)
+              .setColor(0x5865F2)
+              .setTimestamp()
+              .setFooter({ text: 'Mensagem Privada • Summer Garage' });
+
+            const targetUser = await client.users.fetch(userId);
+            await targetUser.send({ embeds: [embed] });
+            await interaction.editReply(`✅ Mensagem enviada para <@${userId}>!`);
+          }
+        } catch (e) {
+          await interaction.editReply(`❌ Erro ao processar: ${e}`);
+        }
+      }
+    });
+
+    client.on('messageCreate', async (message) => {
+      if (!message.content.startsWith('/')) return;
+      
+      const args = message.content.slice(1).split(' ');
+      const command = args[0].toLowerCase();
+
+      if (!isStaff(message.author.id)) return;
+
+      try {
+        switch (command) {
+          case 'panel':
+            const panelEmbed = new EmbedBuilder()
+              .setTitle('⚙️ Painel de Controle Summer Garage')
+              .setDescription('Selecione uma ação abaixo para gerenciar a oficina.')
+              .setColor(0xef4444)
+              .setImage('https://picsum.photos/seed/garage/600/200?blur=2');
+
+            const menu = new StringSelectMenuBuilder()
+              .setCustomId('staff_panel_menu')
+              .setPlaceholder('Escolha uma ferramenta...')
+              .addOptions(
+                {
+                  label: 'Aplicar Advertência',
+                  description: 'Registrar strike e notificar membro',
+                  value: 'warn_member',
+                  emoji: '⚠️',
+                },
+                {
+                  label: 'Enviar Anúncio',
+                  description: 'Mandar mensagem no canal oficial',
+                  value: 'send_announcement',
+                  emoji: '📢',
+                },
+                {
+                  label: 'Mensagem Privada',
+                  description: 'Enviar DM anônima via Bot',
+                  value: 'send_pm',
+                  emoji: '📩',
+                },
+                {
+                  label: 'Status do Sistema',
+                  description: 'Ver estatísticas e logs',
+                  value: 'app_stats',
+                  emoji: '📊',
+                }
+              );
+
+            const row = new ActionRowBuilder<any>().addComponents(menu);
+
+            await message.reply({ 
+              embeds: [panelEmbed], 
+              components: [row],
+              // Ephemeral only works for interactions, so for a message command we just send it.
+              // If you want it private, use it in DM with the bot.
+            });
+            break;
+
+          case 'unwarn':
+            const unUserId = args[1];
+            if (!unUserId) return message.reply('Uso: `/unwarn <user_id>`');
+            
+            if (GUILD_ID) {
+              try {
+                const guild = await client.guilds.fetch(GUILD_ID);
+                const member = await guild.members.fetch(unUserId);
+                const warnRole = guild.roles.cache.find(r => r.name.toLowerCase().includes('warn'));
+                if (warnRole) {
+                  await member.roles.remove(warnRole);
+                }
+              } catch (e) {}
+            }
+
+            const unEmbed = new EmbedBuilder()
+              .setTitle('✅ Punição Removida')
+              .setDescription('Sua advertência foi removida pela liderança da Summer Garage. Mantenha o bom trabalho!')
+              .setColor(0x22c55e)
+              .setTimestamp();
+
+            const unTarget = await client.users.fetch(unUserId);
+            await unTarget.send({ embeds: [unEmbed] });
+            
+            const unLog = new EmbedBuilder()
+              .setTitle('🟢 Log de Unwarn')
+              .setColor(0x22c55e)
+              .addFields(
+                { name: 'Membro', value: `<@${unUserId}>`, inline: true },
+                { name: 'Staff', value: `<@${message.author.id}>`, inline: true }
+              )
+              .setTimestamp();
+            
+            await logToStaff(unLog);
+            message.reply(`✅ Advertência removida de <@${unUserId}>.`);
+            break;
+
+          case 'help':
+            // Keep the old help for quick reference or update it
+            message.reply('Use `/panel` para acessar o menu visual de ferramentas da Staff!');
+            break;
+
+          case 'add_staff':
+            if (!isStaff(message.author.id, 'admin')) return message.reply('❌ Apenas Admins podem gerenciar a Staff.');
+            const targetId = args[1];
+            const role = args[2]?.toLowerCase() as 'admin' | 'manager';
+            if (!targetId || !['admin', 'manager'].includes(role)) return message.reply('Uso: `/add_staff <id> <admin/manager>`');
+            globalState.staff[targetId] = role;
+            message.reply(`✅ Usuário <@${targetId}> adicionado como **${role}**.`);
+            break;
+
+          case 'staff':
+            const staffList = Object.entries(globalState.staff)
+              .map(([id, r]) => `• <@${id}> - **${r}**`)
+              .join('\n');
+            message.reply(`**Membros da Staff:**\n${staffList || 'Nenhum'}`);
+            break;
+
+          case 'ping':
+            message.reply(`Pong! 🏓 Latência: ${client.ws.ping}ms`);
+            break;
+        }
+      } catch (err) {
+        message.reply(`Erro: ${err}`);
+      }
+    });
+
+    client.login(BOT_TOKEN).catch(err => console.error('Failed to login to Discord:', err));
+
+    // Helper to send DMs
+    const sendDM = async (userId: string, content: any) => {
+      try {
+        const user = await client.users.fetch(userId);
+        await user.send(content);
+      } catch (err) {
+        console.error('Error sending DM:', err);
+      }
+    };
+
+    app.post('/api/debug/anonymous', async (req, res) => {
+      const { platform } = req.body;
+      const embed = new EmbedBuilder()
+        .setTitle('🕵️ Acesso Anônimo')
+        .setColor(0xf59e0b)
+        .setDescription('Um usuário iniciou uma sessão em modo anônimo.')
+        .addFields(
+          { name: 'Plataforma', value: platform, inline: true }
+        )
+        .setTimestamp();
+      await sendDM(MASTER_ID, { embeds: [embed] });
+      res.json({ success: true });
+    });
+
+    app.post('/api/debug/login', async (req, res) => {
+      const { user, id, platform } = req.body;
+      const embed = new EmbedBuilder()
+        .setTitle('🔑 Novo Vínculo de Discord')
+        .setColor(0x5865F2)
+        .addFields(
+          { name: 'Usuário', value: `${user} (${id})`, inline: true },
+          { name: 'Plataforma', value: platform, inline: true }
+        )
+        .setTimestamp();
+      await sendDM(MASTER_ID, { embeds: [embed] });
+      res.json({ success: true });
+    });
+
+    app.post('/api/debug/open', async (req, res) => {
+      const { user, id, platform } = req.body;
+      const embed = new EmbedBuilder()
+        .setTitle('📱 App Aberto')
+        .setColor(0x94a3b8)
+        .addFields(
+          { name: 'Usuário', value: `${user} (${id})`, inline: true },
+          { name: 'Plataforma', value: platform, inline: true }
+        )
+        .setTimestamp();
+      await sendDM(MASTER_ID, { embeds: [embed] });
+      res.json({ success: true });
+    });
+
+    app.post('/api/debug/report', async (req, res) => {
+      const { error, stack, user, id, url, platform } = req.body;
+      globalState.errorLogs.push({ time: new Date().toISOString(), error, user, id });
+      
+      const embed = new EmbedBuilder()
+        .setTitle('🚨 Alerta de Erro - Summer Garage')
+        .setColor(0xef4444)
+        .addFields(
+          { name: 'Erro', value: `\`\`\`${error}\`\`\`` },
+          { name: 'Usuário', value: `${user} (${id})`, inline: true },
+          { name: 'Plataforma', value: platform, inline: true },
+          { name: 'URL', value: url },
+          { name: 'Stack Trace', value: `\`\`\`${stack?.slice(0, 1000) || 'N/A'}\`\`\`` }
+        )
+        .setTimestamp();
+
+      await sendDM(MASTER_ID, { embeds: [embed] });
+      res.json({ success: true });
+    });
+
+    app.post('/api/debug/sale', async (req, res) => {
+      const { user, id, total, items, platform, userAgent, monthlyFarm } = req.body;
+      
+      const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(userAgent);
+      const os = /iPhone|iPad|iPod/i.test(userAgent) ? 'iOS' : /Android/i.test(userAgent) ? 'Android' : 'Desktop';
+
+      const embed = new EmbedBuilder()
+        .setTitle('💰 Nova Venda Finalizada!')
+        .setColor(0x22c55e)
+        .addFields(
+          { name: 'Mecânico', value: `${user} (${id})`, inline: true },
+          { name: 'Valor Total', value: `R$ ${total.toLocaleString('pt-BR')}`, inline: true },
+          { name: 'Dispositivo', value: `${os} (${isMobile ? 'Mobile' : 'Desktop'})`, inline: true },
+          { name: 'Itens Vendidos', value: items.length > 0 ? items.join('\n').slice(0, 1024) : 'Nenhum item' },
+          { name: 'Farm Mensal Total', value: `${monthlyFarm} itens`, inline: true }
+        )
+        .setTimestamp();
+
+      await sendDM(MASTER_ID, { embeds: [embed] });
+      res.json({ success: true });
+    });
+
+    app.post('/api/debug/farm', async (req, res) => {
+      const { user, id, amount, monthlyFarm } = req.body;
+      
+      const embed = new EmbedBuilder()
+        .setTitle('🚜 Farm Adicionado')
+        .setColor(0x3b82f6)
+        .addFields(
+          { name: 'Mecânico', value: `${user} (${id})`, inline: true },
+          { name: 'Quantidade', value: `+${amount} itens`, inline: true },
+          { name: 'Farm Mensal Total', value: `${monthlyFarm} itens`, inline: true }
+        )
+        .setTimestamp();
+
+      await sendDM(MASTER_ID, { embeds: [embed] });
+      res.json({ success: true });
+    });
+  }
+
+  // API to get global state (for maintenance/broadcast)
+  app.get('/api/global/state', (req, res) => {
+    res.json({
+      maintenance: globalState.maintenance,
+      broadcast: globalState.broadcast
+    });
+  });
+
+async function startServer() {
   // --- Vite / Static Files ---
 
-  if (process.env.NODE_ENV !== 'production') {
+  if (process.env.NODE_ENV !== 'production' && !process.env.VERCEL) {
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
@@ -379,9 +895,13 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Server running on http://localhost:${PORT}`);
-  });
+  if (!process.env.VERCEL) {
+    app.listen(PORT, '0.0.0.0', () => {
+      console.log(`Server running on http://localhost:${PORT}`);
+    });
+  }
 }
 
 startServer();
+
+export default app;

@@ -5,6 +5,14 @@
   --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
   --color-primary: #ef4444; /* Red-500 */
   --color-primary-dark: #b91c1c; /* Red-700 */
+  
+  --animate-spin-slow: spin 8s linear infinite;
+  --animate-refraction: refraction 4s infinite linear;
+  
+  @keyframes refraction {
+    0% { transform: translate(-30%, -30%); }
+    100% { transform: translate(30%, 30%); }
+  }
 }
 
 @utility no-scrollbar {
@@ -15,11 +23,38 @@
   }
 }
 
+@utility glass-card {
+  @apply bg-white/[0.03] backdrop-blur-xl border border-white/10 shadow-2xl shadow-black/50;
+}
+
+@utility refraction-shine {
+  @apply absolute inset-0 pointer-events-none overflow-hidden;
+  &::after {
+    content: "";
+    @apply absolute top-[-150%] left-[-150%] w-[400%] h-[400%];
+    background: linear-gradient(
+      135deg,
+      transparent 45%,
+      rgba(255, 255, 255, 0.03) 48%,
+      rgba(255, 255, 255, 0.12) 50%,
+      rgba(255, 255, 255, 0.03) 52%,
+      transparent 55%
+    );
+    animation: var(--animate-refraction);
+    filter: blur(30px);
+  }
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
 body {
   @apply bg-zinc-950 text-zinc-100 font-sans antialiased select-none no-scrollbar;
   -webkit-user-select: none;
   -moz-user-select: none;
   -ms-user-select: none;
+  -webkit-overflow-scrolling: touch;
 }
 
 /* Custom range slider styling */
