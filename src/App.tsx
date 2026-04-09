@@ -1123,7 +1123,7 @@ export default function App() {
               transition={{
                 boxShadow: { duration: 2, repeat: Infinity, ease: "easeInOut" }
               }}
-              className="max-w-3xl w-full max-h-[90vh] overflow-y-auto bg-zinc-900 border-2 border-red-600/50 p-6 sm:p-10 rounded-[2.5rem] relative overflow-x-hidden text-center mx-4 no-scrollbar overscroll-contain"
+              className="max-w-3xl w-full max-h-[90vh] lg:max-h-none overflow-y-auto lg:overflow-visible bg-zinc-900 border-2 border-red-600/50 p-6 sm:p-8 rounded-[2.5rem] relative overflow-x-hidden text-center mx-4 no-scrollbar overscroll-contain"
             >
               <div className="flex justify-center mb-4">
                 <div className="p-3 bg-red-600/20 rounded-2xl border border-red-600/30">
@@ -1131,11 +1131,11 @@ export default function App() {
                 </div>
               </div>
               
-              <h3 className="text-2xl sm:text-3xl font-black text-red-600 uppercase tracking-tighter italic mb-4">
+              <h3 className="text-xl sm:text-2xl font-black text-red-600 uppercase tracking-tighter italic mb-4">
                 Aviso de Segurança e Privacidade
               </h3>
               
-              <div className="space-y-4 text-center mb-6">
+              <div className="space-y-3 text-center mb-4">
                 <div className="text-xs sm:text-sm text-zinc-300 leading-relaxed space-y-2">
                   <p>
                     Entendemos sua preocupação, mas gostaríamos de esclarecer que o nosso sistema de vínculo <span className="text-white font-bold italic underline decoration-red-500/50">NÃO tem acesso técnico às suas mensagens privadas, fotos ou qualquer dado pessoal sensível.</span>
@@ -1167,7 +1167,7 @@ export default function App() {
                   </div>
                 </div>
                 
-                <div className="bg-blue-600/10 border border-blue-600/20 p-5 rounded-2xl space-y-2 text-center">
+                <div className="bg-blue-600/10 border border-blue-600/20 p-4 rounded-2xl space-y-1 text-center">
                   <p className="text-sm text-blue-400 font-medium leading-relaxed">
                     <span className="text-white font-bold italic">O nosso bot funciona de forma idêntica ao bot oficial da SummerRP</span>, que gerencia milhares de jogadores e staffs simultaneamente.
                   </p>
