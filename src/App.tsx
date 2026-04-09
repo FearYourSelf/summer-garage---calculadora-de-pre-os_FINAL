@@ -1313,6 +1313,7 @@ export default function App() {
                     src={isAnonymous ? `https://pub-a1b327e0f0794695b6f7d05baa938672.r2.dev/silhouette-1345388323-612x612.png` : (user.avatar ? `https://cdn.discordapp.com/avatars/${user.id}/${user.avatar}.png` : `https://cdn.discordapp.com/embed/avatars/0.png`)} 
                     alt={user.username}
                     className="w-full h-full object-cover"
+                    referrerPolicy="no-referrer"
                   />
                 </div>
                 <span className="text-xs font-bold text-zinc-300">{isAnonymous ? 'Anônimo' : user.username}</span>
@@ -1794,6 +1795,7 @@ export default function App() {
                           src={isAnonymous ? `https://pub-a1b327e0f0794695b6f7d05baa938672.r2.dev/silhouette-1345388323-612x612.png` : (user.avatar ? `https://cdn.discordapp.com/avatars/${user.id}/${user.avatar}.png` : `https://cdn.discordapp.com/embed/avatars/0.png`)} 
                           alt={user.username}
                           className="w-full h-full object-cover"
+                          referrerPolicy="no-referrer"
                         />
                       </div>
                       <div className="absolute -bottom-1 -right-1 bg-green-500 w-4 h-4 rounded-full border-2 border-zinc-900" />
