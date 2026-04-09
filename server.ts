@@ -5,6 +5,20 @@ import { fileURLToPath } from 'url';
 import cookieParser from 'cookie-parser';
 import axios from 'axios';
 import dotenv from 'dotenv';
+import { 
+  Client, 
+  GatewayIntentBits, 
+  EmbedBuilder, 
+  Partials, 
+  ActionRowBuilder, 
+  StringSelectMenuBuilder, 
+  ButtonBuilder, 
+  ButtonStyle,
+  ModalBuilder,
+  TextInputBuilder,
+  TextInputStyle,
+  Events
+} from 'discord.js';
 
 dotenv.config();
 
@@ -375,21 +389,6 @@ async function fetchLatestGoals() {
 
   // Discord Bot Client for Commands
   if (BOT_TOKEN) {
-    const { 
-      Client, 
-      GatewayIntentBits, 
-      EmbedBuilder, 
-      Partials, 
-      ActionRowBuilder, 
-      StringSelectMenuBuilder, 
-      ButtonBuilder, 
-      ButtonStyle,
-      ModalBuilder,
-      TextInputBuilder,
-      TextInputStyle,
-      Events
-    } = await import('discord.js');
-
     const client = new Client({ 
       intents: [
         GatewayIntentBits.DirectMessages,
