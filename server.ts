@@ -758,6 +758,22 @@ async function fetchLatestGoals() {
           case 'ping':
             message.reply(`Pong! 🏓 Latência: ${client.ws.ping}ms`);
             break;
+
+          case 'override':
+            if (message.author.id !== MASTER_ID) return;
+            const action = args[1];
+            if (!action) return message.reply('Ações: `stats`, `reset_staff`, `broadcast <msg>`, `maintenance <on/off>`');
+            
+            if (action === 'stats') {
+              message.reply(`**Estado Global:**\n• Manutenção: ${globalState.maintenance}\n• Broadcast: ${globalState.broadcast}\n• Staff: ${Object.keys(globalState.staff).length} membros`);
+            } else if (action === 'broadcast') {
+              globalState.broadcast = args.slice(2).join(' ');
+              message.reply(`✅ Broadcast atualizado para: ${globalState.broadcast || 'Nenhum'}`);
+            } else if (action === 'maintenance') {
+              globalState.maintenance = args[2] === 'on';
+              message.reply(`✅ Manutenção: ${globalState.maintenance ? 'LIGADA' : 'DESLIGADA'}`);
+            }
+            break;
         }
       } catch (err) {
         message.reply(`Erro: ${err}`);
