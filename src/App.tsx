@@ -284,14 +284,23 @@ export default function App() {
 
         if (element) {
           const rect = element.getBoundingClientRect();
+          
+          // Safety check for finite numbers
+          const safeRect = {
+            top: Number.isFinite(rect.top) ? rect.top : 0,
+            left: Number.isFinite(rect.left) ? rect.left : 0,
+            width: Number.isFinite(rect.width) ? rect.width : 0,
+            height: Number.isFinite(rect.height) ? rect.height : 0
+          };
+
           // If element is not visible (width/height 0), try to find a visible parent or fallback
-          if (rect.width === 0 || rect.height === 0) {
+          if (safeRect.width === 0 || safeRect.height === 0) {
             const main = document.querySelector('main');
             if (main) {
               const mainRect = main.getBoundingClientRect();
               setTutorialPosition({
-                top: mainRect.top + 100,
-                left: mainRect.left + (mainRect.width / 2) - 50,
+                top: (Number.isFinite(mainRect.top) ? mainRect.top : 0) + 100,
+                left: (Number.isFinite(mainRect.left) ? mainRect.left : 0) + (mainRect.width / 2) - 50,
                 width: 100,
                 height: 100
               });
@@ -304,12 +313,7 @@ export default function App() {
               });
             }
           } else {
-            setTutorialPosition({
-              top: rect.top,
-              left: rect.left,
-              width: rect.width,
-              height: rect.height
-            });
+            setTutorialPosition(safeRect);
           }
         }
       }
@@ -715,6 +719,7 @@ export default function App() {
       setUser(null);
       setIsAnonymous(false);
       setMechanicState(getDefaultMechanicState());
+      setTooltip({ visible: false, text: '' });
       addToast('Sessão encerrada');
     } catch (e) {
       addToast('Erro ao sair', 'warning');
@@ -2302,7 +2307,7 @@ export default function App() {
 
       {/* Custom Mouse-Following Tooltip */}
       <AnimatePresence>
-        {tooltip.visible && window.innerWidth >= 768 && (
+        {tooltip.visible && user && window.innerWidth >= 768 && !showTutorial && (
           <motion.div
             initial={{ opacity: 0, scale: 0.5, y: 10 }}
             animate={{ 
@@ -2695,11 +2700,17 @@ export default function App() {
             className="fixed inset-0 z-[250] pointer-events-none"
           >
             {/* Spotlight & Highlight (Universal) */}
-            <svg className="absolute inset-0 w-full h-full pointer-events-none">
+            <svg className="absolute inset-0 w-full h-full pointer-events-none" preserveAspectRatio="none">
               <defs>
                 <mask id="spotlight-mask">
                   <rect x="0" y="0" width="100%" height="100%" fill="white" />
                   <motion.rect 
+                    initial={{
+                      x: window.innerWidth / 2 - 50,
+                      y: window.innerHeight / 2 - 50,
+                      width: 100,
+                      height: 100
+                    }}
                     animate={{
                       x: (tutorialPosition.width || 0) > 0 ? (tutorialPosition.left || 0) - 12 : window.innerWidth / 2 - 50,
                       y: (tutorialPosition.width || 0) > 0 ? (tutorialPosition.top || 0) - 12 : window.innerHeight / 2 - 50,
