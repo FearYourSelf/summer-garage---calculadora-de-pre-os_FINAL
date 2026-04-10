@@ -261,6 +261,7 @@ export default function App() {
   const [toasts, setToasts] = useState<{ id: number, message: string, type: 'success' | 'warning' | 'info' }[]>([]);
   const [user, setUser] = useState<{ id: string, username: string, avatar: string | null, displayName?: string, roles?: { name: string, color: string }[], roleColor?: string } | null>(null);
   const [isAnonymous, setIsAnonymous] = useState(false);
+  const [isFirebaseReady, setIsFirebaseReady] = useState(false);
   const [showAnonymousWarning, setShowAnonymousWarning] = useState(false);
   const MASTER_ID = '1357838586501664849';
   const isMaster = user?.id === MASTER_ID;
@@ -361,7 +362,7 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (user && user.id !== 'anonymous') {
+    if (user && user.id !== 'anonymous' && isFirebaseReady) {
       const docPath = `mechanics/${user.id}`;
       const docRef = doc(db, 'mechanics', user.id);
       
@@ -382,10 +383,10 @@ export default function App() {
 
       return () => unsubscribe();
     }
-  }, [user?.id]);
+  }, [user?.id, isFirebaseReady]);
 
   useEffect(() => {
-    if (user && user.id !== 'anonymous' && mechanicState.mechanicName) {
+    if (user && user.id !== 'anonymous' && mechanicState.mechanicName && isFirebaseReady) {
       // Compare with last data from server to avoid loop
       const { lastUpdate: currentLU, ...restCurrent } = mechanicState;
       const { lastUpdate: lastLU, ...restLast } = lastMechanicDataRef.current || {};
@@ -871,22 +872,29 @@ export default function App() {
       const res = await fetch('/api/auth/me');
       if (res.ok) {
         const data = await res.json();
-        setUser(data);
         
         // Sign into Firebase if custom token is provided
         if (data.firebaseToken) {
           try {
             await signInWithCustomToken(auth, data.firebaseToken);
             console.log('Successfully signed into Firebase with custom token.');
+            setIsFirebaseReady(true);
           } catch (err) {
             console.error('Error signing into Firebase with custom token:', err);
+            setIsFirebaseReady(true); // Set to true anyway to allow fallback attempts
           }
+        } else {
+          setIsFirebaseReady(true);
         }
+        
+        setUser(data);
       } else {
         setUser(null);
+        setIsFirebaseReady(true);
       }
     } catch (e) {
       setUser(null);
+      setIsFirebaseReady(true);
     }
   };
 
@@ -1267,37 +1275,26 @@ export default function App() {
                     <div className="relative">
                       <motion.div 
                         animate={{ 
-                          y: [0, -10, 0],
-                          rotate: [12, 15, 12]
+                          y: [0, -8, 0],
+                          filter: [
+                            "drop-shadow(0 0 0px rgba(220, 38, 38, 0))",
+                            "drop-shadow(0 0 15px rgba(220, 38, 38, 0.4))",
+                            "drop-shadow(0 0 0px rgba(220, 38, 38, 0))"
+                          ]
                         }}
                         transition={{
                           duration: 4,
                           repeat: Infinity,
                           ease: "easeInOut"
                         }}
-                        className="w-20 h-20 sm:w-24 sm:h-24 bg-red-600 rounded-2xl sm:rounded-3xl flex items-center justify-center shadow-lg shadow-red-900/40"
+                        className="w-28 h-28 sm:w-36 sm:h-36 flex items-center justify-center"
                       >
                         <img 
                           src="https://pub-a1b327e0f0794695b6f7d05baa938672.r2.dev/image.png"
                           alt="Summer Garage Logo"
-                          className="w-20 sm:w-24 h-auto object-contain"
+                          className="w-full h-auto object-contain"
                           referrerPolicy="no-referrer"
                         />
-                      </motion.div>
-                      <motion.div 
-                        animate={{ 
-                          scale: [1, 1.2, 1],
-                          opacity: [0.8, 1, 0.8]
-                        }}
-                        transition={{
-                          duration: 2,
-                          repeat: Infinity,
-                          ease: "easeInOut"
-                        }}
-                        className="absolute -top-1 -right-1 sm:-top-2 sm:-right-2 bg-zinc-950 border border-zinc-800 p-1.5 sm:p-2 rounded-lg sm:rounded-xl shadow-lg"
-                      >
-                        <Wrench size={12} className="text-red-500 fill-red-500 sm:hidden" />
-                        <Wrench size={16} className="text-red-500 fill-red-500 hidden sm:block" />
                       </motion.div>
                     </div>
 
