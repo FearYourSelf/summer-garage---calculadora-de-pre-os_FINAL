@@ -1,0 +1,42 @@
+{
+  "entities": {
+    "mechanicState": {
+      "title": "Mechanic State",
+      "description": "Stores the productivity and sales data for a mechanic.",
+      "type": "object",
+      "properties": {
+        "mechanicName": { "type": "string" },
+        "dailyFarm": { "type": "number" },
+        "weeklyFarm": { "type": "number" },
+        "monthlyFarm": { "type": "number" },
+        "itemFarms": { "type": "object" },
+        "financeStatus": { "type": "string", "enum": ["PENDENTE", "EM DIA", "PAGA"] },
+        "salesLog": { "type": "object" },
+        "lastUpdate": { "type": "string", "format": "date-time" },
+        "lastDailyReset": { "type": "string", "format": "date-time" },
+        "lastWeeklyReset": { "type": "string", "format": "date-time" }
+      },
+      "required": ["mechanicName", "dailyFarm", "weeklyFarm", "monthlyFarm", "financeStatus"]
+    },
+    "globalSettings": {
+      "title": "Global Settings",
+      "description": "Stores application-wide settings like maintenance mode and broadcasts.",
+      "type": "object",
+      "properties": {
+        "maintenance": { "type": "boolean" },
+        "broadcast": { "type": "string" },
+        "staff": { "type": "object" }
+      }
+    }
+  },
+  "firestore": {
+    "/mechanics/{userId}": {
+      "schema": "mechanicState",
+      "description": "Individual mechanic productivity and sales data."
+    },
+    "/settings/global": {
+      "schema": "globalSettings",
+      "description": "Global application state."
+    }
+  }
+}

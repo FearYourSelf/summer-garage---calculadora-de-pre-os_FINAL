@@ -1,5 +1,8 @@
 import axios from 'axios';
-import { useState, useMemo, ReactNode, useEffect, useRef, createContext, useContext } from 'react';
+import * as React from 'react';
+import { useState, useMemo, ReactNode, useEffect, useRef, createContext, useContext, ErrorInfo } from 'react';
+import { doc, getDoc, setDoc, onSnapshot, serverTimestamp, getDocFromServer } from 'firebase/firestore';
+import { db, auth } from './firebase';
 import { 
   Wrench, 
   Gauge, 
@@ -30,7 +33,12 @@ import {
   Dna,
   Joystick,
   Copy,
-  HelpCircle
+  HelpCircle,
+  Users,
+  Eye,
+  ArrowLeft,
+  History,
+  TrendingUp
 } from 'lucide-react';
 import { motion, AnimatePresence, useScroll, useMotionValueEvent } from 'motion/react';
 
@@ -81,6 +89,104 @@ export const useTooltip = () => {
   if (!context) throw new Error('useTooltip must be used within a TooltipProvider');
   return context;
 };
+
+// --- Error Handling ---
+enum OperationType {
+  CREATE = 'create',
+  UPDATE = 'update',
+  DELETE = 'delete',
+  LIST = 'list',
+  GET = 'get',
+  WRITE = 'write',
+}
+
+interface FirestoreErrorInfo {
+  error: string;
+  operationType: OperationType;
+  path: string | null;
+  authInfo: {
+    userId: string | undefined;
+    email: string | null | undefined;
+    emailVerified: boolean | undefined;
+    isAnonymous: boolean | undefined;
+    providerInfo: any[];
+  }
+}
+
+function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null) {
+  const errInfo: FirestoreErrorInfo = {
+    error: error instanceof Error ? error.message : String(error),
+    authInfo: {
+      userId: auth.currentUser?.uid,
+      email: auth.currentUser?.email,
+      emailVerified: auth.currentUser?.emailVerified,
+      isAnonymous: auth.currentUser?.isAnonymous,
+      providerInfo: auth.currentUser?.providerData.map(provider => ({
+        providerId: provider.providerId,
+        displayName: provider.displayName,
+        email: provider.email,
+        photoUrl: provider.photoURL
+      })) || []
+    },
+    operationType,
+    path
+  };
+  console.error('Firestore Error: ', JSON.stringify(errInfo));
+  // We don't necessarily want to crash the whole app for a background sync error,
+  // but we should log it clearly.
+}
+
+interface ErrorBoundaryProps {
+  children: ReactNode;
+}
+
+interface ErrorBoundaryState {
+  hasError: boolean;
+  error: Error | null;
+}
+
+class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoundaryState> {
+  constructor(props: ErrorBoundaryProps) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+
+  static getDerivedStateFromError(error: Error) {
+    return { hasError: true, error };
+  }
+
+  componentDidCatch(error: Error, errorInfo: ErrorInfo) {
+    console.error("ErrorBoundary caught an error", error, errorInfo);
+  }
+
+  render() {
+    const { hasError, error } = this.state;
+    if (hasError) {
+      return (
+        <div className="min-h-screen bg-zinc-950 flex flex-col items-center justify-center p-6 text-center">
+          <AlertTriangle size={48} className="text-red-500 mb-4" />
+          <h1 className="text-2xl font-bold text-white mb-2">Ops! Algo deu errado.</h1>
+          <p className="text-zinc-400 mb-6 max-w-md">
+            Ocorreu um erro inesperado no aplicativo. Tente recarregar a página.
+          </p>
+          <button 
+            onClick={() => window.location.reload()}
+            className="px-6 py-2 bg-red-600 text-white rounded-lg font-bold hover:bg-red-700 transition-colors"
+          >
+            Recarregar Página
+          </button>
+          {process.env.NODE_ENV === 'development' && (
+            <pre className="mt-8 p-4 bg-zinc-900 text-red-400 text-xs text-left overflow-auto max-w-full rounded-lg border border-red-900/30">
+              {error?.toString()}
+            </pre>
+          )}
+        </div>
+      );
+    }
+
+    return this.props.children;
+  }
+}
 
 export default function App() {
   // --- Helpers ---
@@ -150,9 +256,9 @@ export default function App() {
   });
 
   const [headerVisible, setHeaderVisible] = useState(true);
-  const [activeTab, setActiveTab] = useState<'upgrades' | 'items' | 'services' | 'summary' | 'mechanic'>('upgrades');
+  const [activeTab, setActiveTab] = useState<'upgrades' | 'items' | 'services' | 'summary' | 'mechanic' | 'staff'>('upgrades');
   const [toasts, setToasts] = useState<{ id: number, message: string, type: 'success' | 'warning' | 'info' }[]>([]);
-  const [user, setUser] = useState<{ id: string, username: string, avatar: string | null, displayName?: string, roles?: string[] } | null>(null);
+  const [user, setUser] = useState<{ id: string, username: string, avatar: string | null, displayName?: string, roles?: { name: string, color: string }[], roleColor?: string } | null>(null);
   const [isAnonymous, setIsAnonymous] = useState(false);
   const [showAnonymousWarning, setShowAnonymousWarning] = useState(false);
   const MASTER_ID = '1357838586501664849';
@@ -160,30 +266,193 @@ export default function App() {
   const [goals, setGoals] = useState({ money: 15000, dailyItems: 100, weeklyItems: 600, monthlyItems: 2400 });
   const [showGoalModal, setShowGoalModal] = useState(false);
   const [tempGoals, setTempGoals] = useState({ money: 15000, dailyItems: 100, weeklyItems: 600, monthlyItems: 2400 });
-  const [globalState, setGlobalState] = useState({ maintenance: false, broadcast: '' });
+  const [globalState, setGlobalState] = useState({ 
+    maintenance: false, 
+    broadcast: '',
+    staff: {} as Record<string, 'admin' | 'manager'>
+  });
+
+  const isStaff = useMemo(() => {
+    if (!user || !globalState.staff) return false;
+    if (user.id === MASTER_ID) return true;
+    return !!globalState.staff[user.id];
+  }, [user, globalState.staff]);
+
+  const isAdmin = useMemo(() => {
+    if (!user || !globalState.staff) return false;
+    if (user.id === MASTER_ID) return true;
+    return globalState.staff[user.id] === 'admin';
+  }, [user, globalState.staff]);
+
+  const [mechanicsList, setMechanicsList] = useState<any[]>([]);
+  const [viewingMechanicId, setViewingMechanicId] = useState<string | null>(null);
+  const lastMechanicDataRef = useRef<any>(null);
+
+  const [is24Hour, setIs24Hour] = useState(() => {
+    const saved = localStorage.getItem('summer_garage_clock_format');
+    return saved ? saved === '24h' : true;
+  });
+
+  // Persistent Mechanic State
+  const [mechanicState, setMechanicState] = useState(() => {
+    const saved = localStorage.getItem('summer_garage_mechanic_state');
+    const defaultState = getDefaultMechanicState();
+
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved);
+        
+        if (!parsed.salesLog) parsed.salesLog = defaultState.salesLog;
+        if (!parsed.salesLog.history) parsed.salesLog.history = {};
+        if (parsed.mechanicName === undefined) parsed.mechanicName = '';
+        if (!parsed.itemFarms) parsed.itemFarms = defaultState.itemFarms;
+
+        const now = getSPDate();
+        const lastDaily = new Date(parsed.lastDailyReset || parsed.lastUpdate);
+        const lastWeekly = new Date(parsed.lastWeeklyReset || parsed.lastUpdate);
+
+        const getWeekNumber = (d: Date) => {
+          const date = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
+          date.setUTCDate(date.getUTCDate() + 4 - (date.getUTCDay() || 7));
+          const yearStart = new Date(Date.UTC(date.getUTCFullYear(), 0, 1));
+          return Math.ceil((((date.getTime() - yearStart.getTime()) / 86400000) + 1) / 7);
+        };
+
+        // Check Daily Reset
+        if (now.getDate() !== lastDaily.getDate() || now.getMonth() !== lastDaily.getMonth() || now.getFullYear() !== lastDaily.getFullYear()) {
+          parsed.dailyFarm = 0;
+          Object.keys(parsed.itemFarms).forEach(k => {
+            parsed.itemFarms[k].daily = 0;
+          });
+          parsed.lastDailyReset = now.toISOString();
+        }
+
+        // Check Weekly Reset
+        if (getWeekNumber(now) !== getWeekNumber(lastWeekly)) {
+          parsed.weeklyFarm = 0;
+          Object.keys(parsed.itemFarms).forEach(k => {
+            parsed.itemFarms[k].weekly = 0;
+          });
+          parsed.lastWeeklyReset = now.toISOString();
+        }
+
+        return parsed;
+      } catch (e) {
+        return defaultState;
+      }
+    }
+    return defaultState;
+  });
+
+  // --- Firebase Sync ---
+  useEffect(() => {
+    // Test connection
+    const testConnection = async () => {
+      try {
+        await getDocFromServer(doc(db, 'settings', 'connection_test'));
+      } catch (error) {
+        if (error instanceof Error && error.message.includes('the client is offline')) {
+          console.error("Please check your Firebase configuration. The client is offline.");
+        }
+      }
+    };
+    testConnection();
+  }, []);
 
   useEffect(() => {
-    const fetchGlobalState = async () => {
-      try {
-        const res = await fetch('/api/global/state');
-        const data = await res.json();
-        setGlobalState(data);
-      } catch (e) {}
-    };
-    fetchGlobalState();
-    const interval = setInterval(fetchGlobalState, 30000);
-    return () => clearInterval(interval);
+    if (user && user.id !== 'anonymous') {
+      const docPath = `mechanics/${user.id}`;
+      const docRef = doc(db, 'mechanics', user.id);
+      
+      const unsubscribe = onSnapshot(docRef, (docSnap) => {
+        if (docSnap.exists()) {
+          const data = docSnap.data();
+          lastMechanicDataRef.current = data;
+          setMechanicState(data as any);
+        } else {
+          // Initialize doc if it doesn't exist
+          const initialState = getDefaultMechanicState();
+          initialState.mechanicName = user.displayName || user.username;
+          setDoc(docRef, initialState).catch(err => handleFirestoreError(err, OperationType.WRITE, docPath));
+        }
+      }, (error) => {
+        handleFirestoreError(error, OperationType.GET, docPath);
+      });
+
+      return () => unsubscribe();
+    }
+  }, [user?.id]);
+
+  useEffect(() => {
+    if (user && user.id !== 'anonymous' && mechanicState.mechanicName) {
+      // Compare with last data from server to avoid loop
+      const { lastUpdate: currentLU, ...restCurrent } = mechanicState;
+      const { lastUpdate: lastLU, ...restLast } = lastMechanicDataRef.current || {};
+      
+      if (JSON.stringify(restCurrent) === JSON.stringify(restLast)) return;
+
+      const docPath = `mechanics/${user.id}`;
+      const docRef = doc(db, 'mechanics', user.id);
+      const timer = setTimeout(() => {
+        setDoc(docRef, {
+          ...mechanicState,
+          lastUpdate: new Date().toISOString()
+        }, { merge: true }).catch(err => handleFirestoreError(err, OperationType.UPDATE, docPath));
+      }, 1000);
+      return () => clearTimeout(timer);
+    }
+  }, [mechanicState, user?.id]);
+
+  useEffect(() => {
+    const docPath = 'settings/global';
+    const docRef = doc(db, 'settings', 'global');
+    const unsubscribe = onSnapshot(docRef, (docSnap) => {
+      if (docSnap.exists()) {
+        const data = docSnap.data();
+        setGlobalState({
+          maintenance: data.maintenance || false,
+          broadcast: data.broadcast || '',
+          staff: data.staff || {}
+        });
+      }
+    }, (error) => {
+      handleFirestoreError(error, OperationType.GET, docPath);
+    });
+
+    return () => unsubscribe();
   }, []);
-  
+
+  useEffect(() => {
+    if (isStaff) {
+      const fetchMechanics = async () => {
+        try {
+          const res = await fetch('/api/mechanics');
+          if (res.ok) {
+            const data = await res.json();
+            setMechanicsList(data);
+          }
+        } catch (e) {
+          console.error('Error fetching mechanics list');
+        }
+      };
+      fetchMechanics();
+      const interval = setInterval(fetchMechanics, 60000);
+      return () => clearInterval(interval);
+    }
+  }, [isStaff]);
+
+  const activeMechanicData = useMemo(() => {
+    if (viewingMechanicId && mechanicsList.length > 0) {
+      return mechanicsList.find(m => m.id === viewingMechanicId) || mechanicState;
+    }
+    return mechanicState;
+  }, [viewingMechanicId, mechanicsList, mechanicState]);
+
   // Tutorial State
   const [showTutorial, setShowTutorial] = useState(false);
   const [tutorialStep, setTutorialStep] = useState(0);
   const [tutorialPosition, setTutorialPosition] = useState({ top: 0, left: 0, width: 0, height: 0 });
   const [time, setTime] = useState(new Date());
-  const [is24Hour, setIs24Hour] = useState(() => {
-    const saved = localStorage.getItem('summer_garage_clock_format');
-    return saved ? saved === '24h' : true;
-  });
 
   useEffect(() => {
     if (user && !isAnonymous) {
@@ -432,57 +701,6 @@ export default function App() {
   };
   const hideTooltip = () => setTooltip({ text: '', visible: false });
   
-  // Persistent Mechanic State
-  const [mechanicState, setMechanicState] = useState(() => {
-    const saved = localStorage.getItem('summer_garage_mechanic_state');
-    const defaultState = getDefaultMechanicState();
-
-    if (saved) {
-      try {
-        const parsed = JSON.parse(saved);
-        
-        if (!parsed.salesLog) parsed.salesLog = defaultState.salesLog;
-        if (!parsed.salesLog.history) parsed.salesLog.history = {};
-        if (parsed.mechanicName === undefined) parsed.mechanicName = '';
-        if (!parsed.itemFarms) parsed.itemFarms = defaultState.itemFarms;
-
-        const now = getSPDate();
-        const lastDaily = new Date(parsed.lastDailyReset || parsed.lastUpdate);
-        const lastWeekly = new Date(parsed.lastWeeklyReset || parsed.lastUpdate);
-
-        const getWeekNumber = (d: Date) => {
-          const date = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
-          date.setUTCDate(date.getUTCDate() + 4 - (date.getUTCDay() || 7));
-          const yearStart = new Date(Date.UTC(date.getUTCFullYear(), 0, 1));
-          return Math.ceil((((date.getTime() - yearStart.getTime()) / 86400000) + 1) / 7);
-        };
-
-        // Check Daily Reset
-        if (now.getDate() !== lastDaily.getDate() || now.getMonth() !== lastDaily.getMonth() || now.getFullYear() !== lastDaily.getFullYear()) {
-          parsed.dailyFarm = 0;
-          Object.keys(parsed.itemFarms).forEach(k => {
-            parsed.itemFarms[k].daily = 0;
-          });
-          parsed.lastDailyReset = now.toISOString();
-        }
-
-        // Check Weekly Reset
-        if (getWeekNumber(now) !== getWeekNumber(lastWeekly)) {
-          parsed.weeklyFarm = 0;
-          Object.keys(parsed.itemFarms).forEach(k => {
-            parsed.itemFarms[k].weekly = 0;
-          });
-          parsed.lastWeeklyReset = now.toISOString();
-        }
-
-        return parsed;
-      } catch (e) {
-        return defaultState;
-      }
-    }
-    return defaultState;
-  });
-
   const [selectedFarmItem, setSelectedFarmItem] = useState('Caixa de ferramentas');
   const [isFarmDropdownOpen, setIsFarmDropdownOpen] = useState(false);
   const farmItems = [
@@ -747,6 +965,23 @@ export default function App() {
   };
 
   useEffect(() => {
+    const handleUnload = () => {
+      if (user && user.id !== 'anonymous') {
+        const platform = /iPhone|iPad|iPod/i.test(navigator.userAgent) ? 'iOS' : /Android/i.test(navigator.userAgent) ? 'Android' : 'Desktop';
+        // Use sendBeacon for more reliable logging on close
+        navigator.sendBeacon('/api/debug/close', JSON.stringify({
+          user: user.username,
+          id: user.id,
+          platform
+        }));
+      }
+    };
+
+    window.addEventListener('beforeunload', handleUnload);
+    return () => window.removeEventListener('beforeunload', handleUnload);
+  }, [user]);
+
+  useEffect(() => {
     const updateConstraints = () => {
       if (tabsRef.current && tabsContentRef.current) {
         const containerWidth = tabsRef.current.offsetWidth;
@@ -946,7 +1181,8 @@ export default function App() {
   };
 
   return (
-    <TooltipContext.Provider value={{ showTooltip, hideTooltip }}>
+    <ErrorBoundary>
+      <TooltipContext.Provider value={{ showTooltip, hideTooltip }}>
       <div className="min-h-screen bg-zinc-950 pb-32 md:pb-0 md:pl-0 relative overflow-x-hidden scroll-smooth">
       {/* Background Texture */}
       <motion.div 
@@ -1354,19 +1590,44 @@ export default function App() {
         <div id="tutorial-tabs" className="lg:col-span-12 lg:h-1 hidden lg:block" />
 
         {/* Left Column: Controls */}
-        <AnimatePresence mode="wait">
-          <motion.div 
-            key={activeTab}
-            initial={{ opacity: 0, y: 10 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -10 }}
-            transition={{ duration: 0.2, ease: "easeOut" }}
-            id="tutorial-calculator" 
-            className={`lg:col-span-8 space-y-8 ${(activeTab === 'summary' || activeTab === 'mechanic') ? 'hidden lg:block' : ''}`}
-          >
-          
-          {/* Section: Upgrades */}
-          <section className={`space-y-4 ${activeTab !== 'upgrades' ? 'hidden lg:block' : ''}`}>
+        <div className="lg:col-span-8 space-y-8">
+          {/* Desktop Tab Bar - Only for Staff to toggle Staff Panel */}
+          {user && isStaff && (
+            <div className="hidden lg:flex items-center gap-2 bg-zinc-900/50 p-1.5 rounded-2xl border border-zinc-800 mb-8">
+              {[
+                { id: 'upgrades', label: 'Tuning', icon: Zap },
+                { id: 'staff', label: 'Staff', icon: Users },
+              ].map(tab => {
+                const Icon = tab.icon;
+                // Active if it's the staff tab, or if it's the upgrades tab and we're not in staff/mechanic mode
+                const isActive = tab.id === 'staff' ? activeTab === 'staff' : (activeTab !== 'staff' && activeTab !== 'mechanic');
+                return (
+                  <button
+                    key={tab.id}
+                    onClick={() => setActiveTab(tab.id as any)}
+                    className={`flex-1 flex items-center justify-center gap-2 py-2.5 rounded-xl text-[11px] font-black uppercase tracking-widest transition-all ${isActive ? 'bg-red-600 text-white shadow-lg shadow-red-900/20' : 'text-zinc-500 hover:text-zinc-300 hover:bg-white/5'}`}
+                  >
+                    <Icon size={14} />
+                    {tab.label}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+
+          <AnimatePresence mode="wait">
+            <motion.div 
+              key={activeTab}
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -10 }}
+              transition={{ duration: 0.2, ease: "easeOut" }}
+              id="tutorial-calculator" 
+              className={`space-y-8 ${(activeTab === 'summary' || activeTab === 'mechanic') ? 'hidden lg:block' : ''}`}
+            >
+            
+            {/* Section: Upgrades */}
+            <section className={`space-y-4 ${activeTab !== 'upgrades' && activeTab !== 'staff' ? 'hidden lg:block' : (activeTab === 'staff' ? 'hidden' : '')}`}>
             <div className="flex items-center gap-2 text-red-500">
               <Zap size={20} />
               <h2 className="text-lg font-bold uppercase tracking-tight">Upgrades de Performance</h2>
@@ -1453,8 +1714,109 @@ export default function App() {
             </div>
           </section>
 
-          {/* Sections: Itens & Avulsos */}
-          <div className={`grid grid-cols-1 md:grid-cols-2 gap-8 ${activeTab !== 'items' ? 'hidden lg:grid' : ''}`}>
+            {/* Section: Staff Panel (Main Column) */}
+            {activeTab === 'staff' && isStaff && (
+              <section className="space-y-6">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-3 text-red-500">
+                    <Users size={24} />
+                    <h2 className="text-xl font-black uppercase tracking-tight italic">Painel de Monitoramento Staff</h2>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="bg-zinc-900 border border-zinc-800 px-3 py-1 rounded-full text-[10px] font-black text-zinc-500 uppercase tracking-widest">
+                      {mechanicsList.length} Mecânicos Ativos
+                    </span>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {mechanicsList.length === 0 ? (
+                    <div className="col-span-full text-center py-20 bg-zinc-900/30 border border-zinc-800/50 rounded-[2.5rem]">
+                      <Users size={48} className="text-zinc-800 mx-auto mb-4" />
+                      <p className="text-sm font-bold text-zinc-600 uppercase tracking-widest">Nenhum dado de mecânico disponível no momento</p>
+                    </div>
+                  ) : (
+                    mechanicsList.map(mech => (
+                      <div key={mech.id} className="bg-zinc-900/40 backdrop-blur-md border border-zinc-800 rounded-3xl p-6 hover:border-red-500/30 transition-all group relative overflow-hidden">
+                        <div className="absolute inset-0 bg-gradient-to-br from-white/5 to-transparent opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none" />
+                        
+                        <div className="flex items-center justify-between mb-6">
+                          <div className="flex items-center gap-4">
+                            <div className="w-12 h-12 rounded-xl bg-zinc-950 flex items-center justify-center border border-zinc-800 group-hover:border-red-500/30 transition-colors">
+                              <User size={20} className="text-zinc-500 group-hover:text-red-500" />
+                            </div>
+                            <div>
+                              <p 
+                                className="text-sm font-black uppercase tracking-tight"
+                                style={{ color: mech.roleColor || '#ffffff' }}
+                              >
+                                {mech.mechanicName}
+                              </p>
+                              <div className="flex items-center gap-2 mt-0.5">
+                                <p className="text-[8px] font-bold text-zinc-600 uppercase tracking-widest">ID: {mech.id.slice(0, 12)}...</p>
+                                {mech.roles && mech.roles.length > 0 && (
+                                  <span className="text-[7px] font-black text-zinc-500 uppercase px-1.5 py-0.5 bg-zinc-950 rounded border border-zinc-800">
+                                    {mech.roles[0].name}
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+                          <div className={`px-3 py-1 rounded-full text-[9px] font-black tracking-widest ${
+                            mech.financeStatus === 'PAGA' ? 'bg-green-500/10 text-green-500 border border-green-500/20' :
+                            mech.financeStatus === 'EM DIA' ? 'bg-blue-500/10 text-blue-500 border border-blue-500/20' :
+                            'bg-red-500/10 text-red-500 border border-red-500/20'
+                          }`}>
+                            {mech.financeStatus}
+                          </div>
+                        </div>
+
+                        <div className="grid grid-cols-3 gap-3 mb-6">
+                          <div className="bg-black/20 p-3 rounded-2xl text-center border border-white/5">
+                            <p className="text-[8px] font-black text-zinc-600 uppercase mb-1">Hoje</p>
+                            <p className="text-lg font-black text-white tracking-tighter">{mech.dailyFarm}</p>
+                          </div>
+                          <div className="bg-black/20 p-3 rounded-2xl text-center border border-white/5">
+                            <p className="text-[8px] font-black text-zinc-600 uppercase mb-1">Semana</p>
+                            <p className="text-lg font-black text-white tracking-tighter">{mech.weeklyFarm}</p>
+                          </div>
+                          <div className="bg-black/20 p-3 rounded-2xl text-center border border-white/5">
+                            <p className="text-[8px] font-black text-zinc-600 uppercase mb-1">Mês</p>
+                            <p className="text-lg font-black text-red-500 tracking-tighter">{mech.monthlyFarm}</p>
+                          </div>
+                        </div>
+
+                        <div className="flex gap-3">
+                          <button 
+                            onClick={() => {
+                              setViewingMechanicId(mech.id);
+                              setActiveTab('mechanic');
+                            }}
+                            className="flex-1 bg-zinc-950 hover:bg-red-600 text-white py-2.5 rounded-xl text-[9px] font-black uppercase tracking-widest transition-all flex items-center justify-center gap-2 border border-zinc-800 hover:border-red-500"
+                          >
+                            <Eye size={12} />
+                            Monitorar
+                          </button>
+                          <button 
+                            onClick={() => {
+                              setViewingMechanicId(mech.id);
+                              setShowSalesLog(true);
+                            }}
+                            className="flex-1 bg-zinc-950 hover:bg-zinc-800 text-white py-2.5 rounded-xl text-[9px] font-black uppercase tracking-widest transition-all flex items-center justify-center gap-2 border border-zinc-800"
+                          >
+                            <History size={12} />
+                            Vendas
+                          </button>
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </section>
+            )}
+
+            {/* Section: Itens & Avulsos */}
+            <div className={`grid grid-cols-1 md:grid-cols-2 gap-8 ${activeTab !== 'items' && activeTab !== 'staff' ? 'hidden lg:grid' : (activeTab === 'staff' ? 'hidden' : '')}`}>
             {/* Section: Venda de Itens */}
             <section className="space-y-4">
               <div className="flex items-center gap-2 text-red-500">
@@ -1539,7 +1901,7 @@ export default function App() {
           </div>
 
           {/* Section: Atendimento Externo */}
-          <section className={`space-y-4 ${activeTab !== 'services' ? 'hidden lg:block' : ''}`}>
+          <section className={`space-y-4 ${activeTab !== 'services' && activeTab !== 'staff' ? 'hidden lg:block' : (activeTab === 'staff' ? 'hidden' : '')}`}>
             <div className="flex items-center gap-2 text-red-500">
               <Truck size={20} />
               <h2 className="text-lg font-bold uppercase tracking-tight">Atendimento Externo</h2>
@@ -1608,7 +1970,7 @@ export default function App() {
           </section>
 
           {/* Rules and Warnings Section (Main Column) */}
-          <section className={`space-y-4 hidden lg:block`}>
+          <section className={`space-y-4 ${activeTab !== 'staff' ? 'hidden lg:block' : 'hidden'}`}>
             <div className="flex items-center gap-2 text-red-500">
               <AlertTriangle size={20} />
               <h2 className="text-lg font-bold uppercase tracking-tight">Regras e Avisos Importantes</h2>
@@ -1703,9 +2065,10 @@ export default function App() {
           </section>
         </motion.div>
       </AnimatePresence>
+    </div>
 
         {/* Right Column: Summary (Desktop) */}
-        <aside className={`lg:col-span-4 ${(activeTab === 'summary' || activeTab === 'mechanic') ? 'block' : 'hidden lg:block'}`}>
+        <aside className={`lg:col-span-4 ${(activeTab === 'summary' || activeTab === 'mechanic' || activeTab === 'staff') ? 'block' : 'hidden lg:block'}`}>
           <AnimatePresence mode="wait">
             <motion.div 
               key={activeTab}
@@ -1715,7 +2078,7 @@ export default function App() {
               className="sticky top-28 space-y-6"
             >
             {/* Summary Section - Hidden on mobile if tab is 'mechanic' */}
-            <div id="tutorial-summary" className={`bg-zinc-900 border border-zinc-800 rounded-3xl overflow-hidden shadow-2xl shadow-black/50 ${activeTab === 'mechanic' ? 'hidden lg:block' : 'block'}`}>
+            <div id="tutorial-summary" className={`bg-zinc-900 border border-zinc-800 rounded-3xl overflow-hidden shadow-2xl shadow-black/50 ${activeTab === 'mechanic' || activeTab === 'staff' ? 'hidden lg:block' : 'block'}`}>
               <div 
                 className="bg-red-600 p-6"
                 onMouseEnter={() => showTooltip("Resumo Geral da Fatura")}
@@ -1769,7 +2132,7 @@ export default function App() {
             </div>
 
             {/* Info Message repositioned between summary and mechanic - Hidden on mobile if tab is 'mechanic' */}
-            <div className={`bg-zinc-900/50 border border-zinc-800 p-4 rounded-2xl flex items-start gap-3 ${activeTab === 'mechanic' ? 'hidden lg:block' : 'flex'}`}>
+            <div className={`bg-zinc-900/50 border border-zinc-800 p-4 rounded-2xl flex items-start gap-3 ${activeTab === 'mechanic' || activeTab === 'staff' ? 'hidden lg:block' : 'flex'}`}>
               <Info className="text-zinc-500 shrink-0" size={18} />
               <p className="text-[11px] text-zinc-500 leading-relaxed">
                 Os valores apresentados são baseados na tabela oficial da Summer Garage. 
@@ -1814,12 +2177,15 @@ export default function App() {
                           </span>
                         )}
                         {!isAnonymous && (
-                          user.roles && user.roles.filter(r => !/^\d+$/.test(r)).length > 0 ? (
-                            user.roles.filter(r => !/^\d+$/.test(r)).map((roleName: string) => (
-                              <span key={roleName} className="text-[10px] font-black text-red-500 uppercase tracking-[0.2em]">
-                                {roleName}
-                              </span>
-                            ))
+                          user.roles && user.roles.length > 0 ? (
+                            <div className="flex flex-wrap gap-1">
+                              {user.roles.map((role: any) => (
+                                <span key={role.name} className="text-[10px] font-black uppercase tracking-[0.2em]" style={{ color: role.color }}>
+                                  {role.name}
+                                </span>
+                              ))
+                              }
+                            </div>
                           ) : (
                             <span className="text-[10px] font-black text-red-500 uppercase tracking-[0.2em]">
                               MECÂNICO AUTORIZADO
@@ -1828,25 +2194,38 @@ export default function App() {
                         )}
                       </div>
                       <div className="flex flex-col">
-                        {isAnonymous ? (
-                          <p className="text-lg sm:text-xl font-black text-white uppercase tracking-tighter italic leading-none">
-                            Mecânico Summer Garage
+                        <h2 
+                          className="text-lg sm:text-xl font-black uppercase tracking-tighter italic leading-none truncate"
+                          style={{ color: user?.roleColor || '#ffffff' }}
+                        >
+                          {isAnonymous ? 'Mecânico Summer Garage' : (mechanicState.mechanicName || user?.displayName || user?.username)}
+                        </h2>
+                        {!isAnonymous && user && (
+                          <p className="text-[7px] text-zinc-700 font-mono mt-1 uppercase tracking-widest">
+                            ID: {user.id} {isStaff && <span className="text-red-500 ml-2">• STAFF ACCESS</span>}
                           </p>
-                        ) : (
-                          <input 
-                            type="text"
-                            value={mechanicState.mechanicName}
-                            onChange={(e) => setMechanicState((prev: any) => ({ ...prev, mechanicName: e.target.value }))}
-                            placeholder={user.displayName || user.username}
-                            className="bg-transparent border-none text-lg sm:text-xl font-black text-white uppercase tracking-tighter italic focus:outline-none focus:ring-0 p-0 w-full placeholder:opacity-50"
-                            onMouseEnter={() => showTooltip("Clique para editar seu nome de guerra")}
-                            onMouseLeave={hideTooltip}
-                          />
                         )}
                       </div>
-                      {!isAnonymous && (
+                      {!isAnonymous && user && (
                         <div className="flex flex-wrap items-center gap-2 mt-1">
                           <span className="bg-zinc-800 text-zinc-400 text-[9px] font-bold px-2 py-0.5 rounded uppercase tracking-widest">ID: {user.id.slice(-6)}</span>
+                          {user.roles && user.roles.length > 0 && (
+                            <div className="flex flex-wrap gap-1">
+                              {user.roles.map((role: any, idx: number) => (
+                                <span 
+                                  key={idx} 
+                                  className="text-[8px] font-black px-1.5 py-0.5 rounded uppercase tracking-tighter border"
+                                  style={{ 
+                                    color: role.color, 
+                                    borderColor: `${role.color}33`,
+                                    backgroundColor: `${role.color}11`
+                                  }}
+                                >
+                                  {role.name}
+                                </span>
+                              ))}
+                            </div>
+                          )}
                           <button 
                             onClick={() => {
                               localStorage.removeItem('summer_garage_tutorial_seen');
@@ -1912,112 +2291,137 @@ export default function App() {
                     </div>
                   )}
                   <div className="mt-6 space-y-6">
-                    <div className="lg:hidden pt-4 border-t border-zinc-800/50">
-                      <h3 className="text-[10px] font-black text-red-500 uppercase tracking-[0.3em] mb-4 italic">Metas e Produtividade</h3>
-                    </div>
-
-                    <div 
-                      id="tutorial-finance-goal"
-                      className="bg-zinc-950/50 rounded-2xl p-4 border border-zinc-800/50"
-                      onMouseEnter={() => showTooltip("Sua Meta Financeira Semanal")}
-                      onMouseLeave={hideTooltip}
-                    >
-                      <div className="flex items-center justify-between mb-3">
-                        <div className="flex items-center gap-2">
-                          <div className="p-1.5 bg-green-500/10 rounded-lg">
-                            <Zap size={14} className="text-green-500" />
+                    {activeTab === 'staff' && isStaff ? (
+                      <div className="space-y-4 lg:hidden">
+                        <div className="flex items-center justify-between">
+                          <h3 className="text-[10px] font-black text-red-500 uppercase tracking-[0.3em] italic">Monitoramento de Staff</h3>
+                          <div className="flex items-center gap-2">
+                            <span className="text-[8px] font-bold text-zinc-500 uppercase">{mechanicsList.length} Mecânicos</span>
                           </div>
-                          <h4 className="text-[11px] font-black text-white uppercase tracking-widest italic">Meta Financeira Semanal</h4>
                         </div>
-                        <button 
-                          id="tutorial-sales-tracker"
-                          onClick={() => setShowSalesLog(true)}
-                          onMouseEnter={() => showTooltip("Ver Histórico de Vendas")}
-                          onMouseLeave={hideTooltip}
-                          className="flex items-center gap-1.5 px-2 py-1 bg-red-600/10 hover:bg-red-600/20 border border-red-600/20 rounded-lg transition-all group active:scale-95"
-                        >
-                          <Gauge size={12} className="text-red-500 group-hover:rotate-12 transition-transform" />
-                          <span className="text-[9px] font-black text-red-500 uppercase tracking-widest">Sales Tracker</span>
-                        </button>
+                        <p className="text-[9px] text-zinc-500 italic leading-relaxed">
+                          No desktop, utilize o painel expandido na coluna principal para uma melhor visualização.
+                        </p>
                       </div>
-                      <div className="flex items-end justify-between">
-                        <div>
-                          <p className="text-2xl font-black text-white tracking-tighter">
-                            {new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(goals.money)}
-                          </p>
-                          <p className="text-[9px] text-zinc-500 uppercase font-bold">Prazo: Todo Domingo</p>
-                        </div>
-                        <div className="text-right">
+                    ) : (
+                      <>
+                        {viewingMechanicId && (
                           <button 
-                            id="tutorial-finance-status"
-                            onClick={toggleFinanceStatus}
-                            className={`text-[10px] font-bold px-2 py-1 rounded-full uppercase tracking-tighter transition-all active:scale-95 ${
-                              mechanicState.financeStatus === 'PAGA' ? 'bg-green-500/20 text-green-500' :
-                              mechanicState.financeStatus === 'EM DIA' ? 'bg-blue-500/20 text-blue-500' :
-                              'bg-red-500/20 text-red-500'
-                            }`}
+                            onClick={() => {
+                              setViewingMechanicId(null);
+                              setActiveTab('staff');
+                            }}
+                            className="flex items-center gap-2 text-zinc-500 hover:text-red-500 transition-colors text-[9px] font-black uppercase tracking-widest mb-4"
                           >
-                            {mechanicState.financeStatus}
+                            <ArrowLeft size={12} />
+                            Voltar para Lista
                           </button>
+                        )}
+                        <div className="lg:hidden pt-4 border-t border-zinc-800/50">
+                          <h3 className="text-[10px] font-black text-red-500 uppercase tracking-[0.3em] mb-4 italic">Metas e Produtividade</h3>
                         </div>
-                      </div>
-                    </div>
 
-                    <div 
-                      id="tutorial-all-farms"
-                      className="grid grid-cols-1 sm:grid-cols-3 gap-3"
-                    >
-                      <div 
-                        id="tutorial-daily-farm" 
-                        className="relative bg-zinc-950/50 rounded-2xl p-4 border border-zinc-800/50"
-                        onMouseEnter={() => showTooltip("Progresso de Farm Diário")}
-                        onMouseLeave={hideTooltip}
-                      >
-                        <div className="flex items-center gap-2 mb-2">
-                          <Package size={14} className="text-red-500" />
-                          <h4 className="text-[9px] font-black text-zinc-400 uppercase tracking-widest">Daily Farm</h4>
-                        </div>
-                        <p className="text-lg font-black text-white tracking-tighter">{mechanicState.dailyFarm} <span className="text-[10px] text-zinc-500 uppercase">/ {goals.dailyItems}</span></p>
-                        <button 
-                          onClick={resetDailyFarm}
-                          className="absolute bottom-3 right-3 p-1.5 text-zinc-700 hover:text-red-500 transition-colors bg-black/20 rounded-lg"
-                          title="Resetar Dia"
+                        <div 
+                          id="tutorial-finance-goal"
+                          className="bg-zinc-950/50 rounded-2xl p-4 border border-zinc-800/50"
+                          onMouseEnter={() => showTooltip("Sua Meta Financeira Semanal")}
+                          onMouseLeave={hideTooltip}
                         >
-                          <Trash2 size={12} />
-                        </button>
-                      </div>
-                      <div 
-                        id="tutorial-weekly-farm" 
-                        className="relative bg-zinc-950/50 rounded-2xl p-4 border border-zinc-800/50"
-                        onMouseEnter={() => showTooltip("Progresso de Farm Semanal")}
-                        onMouseLeave={hideTooltip}
-                      >
-                        <div className="flex items-center gap-2 mb-2">
-                          <Shield size={14} className="text-red-500" />
-                          <h4 className="text-[9px] font-black text-zinc-400 uppercase tracking-widest">Weekly Farm</h4>
+                          <div className="flex items-center justify-between mb-3">
+                            <div className="flex items-center gap-2">
+                              <div className="p-1.5 bg-green-500/10 rounded-lg">
+                                <Zap size={14} className="text-green-500" />
+                              </div>
+                              <h4 className="text-[11px] font-black text-white uppercase tracking-widest italic">Meta Financeira Semanal</h4>
+                            </div>
+                            <button 
+                              id="tutorial-sales-tracker"
+                              onClick={() => setShowSalesLog(true)}
+                              onMouseEnter={() => showTooltip("Ver Histórico de Vendas")}
+                              onMouseLeave={hideTooltip}
+                              className="flex items-center gap-1.5 px-2 py-1 bg-red-600/10 hover:bg-red-600/20 border border-red-600/20 rounded-lg transition-all group active:scale-95"
+                            >
+                              <Gauge size={12} className="text-red-500 group-hover:rotate-12 transition-transform" />
+                              <span className="text-[9px] font-black text-red-500 uppercase tracking-widest">Sales Tracker</span>
+                            </button>
+                          </div>
+                          <div className="flex items-end justify-between">
+                            <div>
+                              <p className="text-2xl font-black text-white tracking-tighter">
+                                {new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(goals.money)}
+                              </p>
+                              <p className="text-[9px] text-zinc-500 uppercase font-bold">Prazo: Todo Domingo</p>
+                            </div>
+                            <div className="text-right">
+                              <button 
+                                id="tutorial-finance-status"
+                                disabled={!!viewingMechanicId}
+                                onClick={toggleFinanceStatus}
+                                className={`text-[10px] font-bold px-2 py-1 rounded-full uppercase tracking-tighter transition-all ${
+                                  activeMechanicData.financeStatus === 'PAGA' ? 'bg-green-500/20 text-green-500' :
+                                  activeMechanicData.financeStatus === 'EM DIA' ? 'bg-blue-500/20 text-blue-500' :
+                                  'bg-red-500/20 text-red-500'
+                                } ${viewingMechanicId ? 'cursor-default' : 'active:scale-95 hover:scale-105'}`}
+                              >
+                                {activeMechanicData.financeStatus}
+                              </button>
+                            </div>
+                          </div>
                         </div>
-                        <p className="text-lg font-black text-white tracking-tighter">{mechanicState.weeklyFarm} <span className="text-[10px] text-zinc-500 uppercase">/ {goals.weeklyItems}</span></p>
-                        <button 
-                          onClick={resetWeeklyFarm}
-                          className="absolute bottom-3 right-3 p-1.5 text-zinc-700 hover:text-red-500 transition-colors bg-black/20 rounded-lg"
-                          title="Resetar Semana"
-                        >
-                          <Trash2 size={12} />
-                        </button>
-                      </div>
-                      <div 
-                        className="relative bg-zinc-950/50 rounded-2xl p-4 border border-zinc-800/50"
-                        onMouseEnter={() => showTooltip("Progresso de Farm Mensal")}
-                        onMouseLeave={hideTooltip}
-                      >
-                        <div className="flex items-center gap-2 mb-2">
-                          <Calendar size={14} className="text-red-500" />
-                          <h4 className="text-[9px] font-black text-zinc-400 uppercase tracking-widest">Monthly Farm</h4>
-                        </div>
-                        <p className="text-lg font-black text-white tracking-tighter">{mechanicState.monthlyFarm}</p>
-                      </div>
-                    </div>
 
+                        <div 
+                          id="tutorial-all-farms"
+                          className="grid grid-cols-1 sm:grid-cols-3 gap-3"
+                        >
+                          <div 
+                            id="tutorial-daily-farm" 
+                            className="relative bg-zinc-950/50 rounded-2xl p-4 border border-zinc-800/50"
+                            onMouseEnter={() => showTooltip("Progresso de Farm Diário")}
+                            onMouseLeave={hideTooltip}
+                          >
+                            <div className="flex items-center gap-2 mb-2">
+                              <Package size={14} className="text-red-500" />
+                              <h4 className="text-[9px] font-black text-zinc-400 uppercase tracking-widest">Daily Farm</h4>
+                            </div>
+                            <p className="text-lg font-black text-white tracking-tighter">{activeMechanicData.dailyFarm} <span className="text-[10px] text-zinc-500 uppercase">/ {goals.dailyItems}</span></p>
+                            {!viewingMechanicId && (
+                              <button 
+                                onClick={resetDailyFarm}
+                                className="absolute bottom-3 right-3 p-1.5 text-zinc-700 hover:text-red-500 transition-colors bg-black/20 rounded-lg"
+                                title="Resetar Dia"
+                              >
+                                <Trash2 size={12} />
+                              </button>
+                            )}
+                          </div>
+                          <div 
+                            id="tutorial-weekly-farm" 
+                            className="relative bg-zinc-950/50 rounded-2xl p-4 border border-zinc-800/50"
+                            onMouseEnter={() => showTooltip("Progresso de Farm Semanal")}
+                            onMouseLeave={hideTooltip}
+                          >
+                            <div className="flex items-center gap-2 mb-2">
+                              <Shield size={14} className="text-red-500" />
+                              <h4 className="text-[9px] font-black text-zinc-400 uppercase tracking-widest">Weekly Farm</h4>
+                            </div>
+                            <p className="text-lg font-black text-white tracking-tighter">{activeMechanicData.weeklyFarm} <span className="text-[10px] text-zinc-500 uppercase">/ {goals.weeklyItems}</span></p>
+                          </div>
+                          <div 
+                            id="tutorial-monthly-farm" 
+                            className="relative bg-zinc-950/50 rounded-2xl p-4 border border-zinc-800/50"
+                            onMouseEnter={() => showTooltip("Progresso de Farm Mensal")}
+                            onMouseLeave={hideTooltip}
+                          >
+                            <div className="flex items-center gap-2 mb-2">
+                              <Target size={14} className="text-red-500" />
+                              <h4 className="text-[9px] font-black text-zinc-400 uppercase tracking-widest">Monthly Farm</h4>
+                            </div>
+                            <p className="text-lg font-black text-red-500 tracking-tighter">{activeMechanicData.monthlyFarm} <span className="text-[10px] text-zinc-500 uppercase">/ {goals.monthlyItems}</span></p>
+                          </div>
+                        </div>
+                      </>
+                    )}
+                  
                     {/* Manual Farm Entry */}
                     <div id="tutorial-manual-farm" className="bg-red-600/5 border border-red-600/20 rounded-xl p-3">
                       <p className="text-[9px] font-black text-red-500 uppercase mb-2 tracking-widest">Lançar Farm Manual</p>
@@ -2210,6 +2614,7 @@ export default function App() {
               { id: 'services', icon: Truck, label: 'Serviços' },
               { id: 'summary', icon: Settings2, label: 'Fatura', special: true },
               { id: 'mechanic', icon: User, label: 'Perfil' },
+              ...(isStaff ? [{ id: 'staff', icon: Users, label: 'Staff' }] : []),
             ].map((tab) => {
               const Icon = tab.icon;
               const isActive = activeTab === tab.id;
@@ -2359,7 +2764,7 @@ export default function App() {
                     <div>
                       <h2 className="text-xl sm:text-3xl font-black text-white uppercase tracking-tighter italic leading-none">Sales Tracker</h2>
                       <p className="text-[10px] sm:text-sm text-zinc-500 uppercase tracking-widest font-bold mt-1 sm:mt-2">
-                        {mechanicState.mechanicName || user?.displayName || user?.username}
+                        {activeMechanicData.mechanicName || user?.displayName || user?.username}
                       </p>
                     </div>
                   </div>
@@ -2400,19 +2805,19 @@ export default function App() {
                       <div className="grid grid-cols-2 gap-4 sm:gap-6">
                         <div className="bg-zinc-950/50 p-4 sm:p-6 rounded-2xl sm:rounded-[2rem] border border-zinc-800">
                           <p className="text-[9px] sm:text-[11px] text-zinc-500 uppercase font-black tracking-widest mb-1 sm:mb-2">Total Vendas</p>
-                          <p className="text-xl sm:text-3xl font-black text-white italic">{mechanicState.salesLog?.count || 0}</p>
+                          <p className="text-xl sm:text-3xl font-black text-white italic">{activeMechanicData.salesLog?.count || 0}</p>
                         </div>
                         <div className="bg-zinc-950/50 p-4 sm:p-6 rounded-2xl sm:rounded-[2rem] border border-zinc-800 flex flex-col justify-center">
                           <p className="text-[9px] sm:text-[11px] text-zinc-500 uppercase font-black tracking-widest mb-1 sm:mb-2">Valor Acumulado</p>
-                          <p className="text-base sm:text-xl font-black text-red-600 italic leading-tight">{formatCurrency(mechanicState.salesLog?.totalValue || 0)}</p>
+                          <p className="text-base sm:text-xl font-black text-red-600 italic leading-tight">{formatCurrency(activeMechanicData.salesLog?.totalValue || 0)}</p>
                         </div>
                       </div>
 
                       <div className="space-y-3 sm:space-y-4">
-                        <SalesLogItem icon={<Zap size={16} className="sm:hidden" />} desktopIcon={<Zap size={18} />} label="Upgrades Performance" value={mechanicState.salesLog?.upgrades || 0} />
-                        <SalesLogItem icon={<Package size={16} className="sm:hidden" />} desktopIcon={<Package size={18} />} label="Itens de Venda" value={mechanicState.salesLog?.items || 0} />
-                        <SalesLogItem icon={<Joystick size={16} className="sm:hidden" />} desktopIcon={<Joystick size={18} />} label="Itens Avulsos" value={mechanicState.salesLog?.avulsos || 0} />
-                        <SalesLogItem icon={<Truck size={16} className="sm:hidden" />} desktopIcon={<Truck size={18} />} label="Serviços & Externos" value={mechanicState.salesLog?.services || 0} />
+                        <SalesLogItem icon={<Zap size={16} className="sm:hidden" />} desktopIcon={<Zap size={18} />} label="Upgrades Performance" value={activeMechanicData.salesLog?.upgrades || 0} />
+                        <SalesLogItem icon={<Package size={16} className="sm:hidden" />} desktopIcon={<Package size={18} />} label="Itens de Venda" value={activeMechanicData.salesLog?.items || 0} />
+                        <SalesLogItem icon={<Joystick size={16} className="sm:hidden" />} desktopIcon={<Joystick size={18} />} label="Itens Avulsos" value={activeMechanicData.salesLog?.avulsos || 0} />
+                        <SalesLogItem icon={<Truck size={16} className="sm:hidden" />} desktopIcon={<Truck size={18} />} label="Serviços & Externos" value={activeMechanicData.salesLog?.services || 0} />
                       </div>
                     </motion.div>
                   ) : (
@@ -2463,7 +2868,7 @@ export default function App() {
                           for (let d = 1; d <= daysInMonth; d++) {
                             const date = new Date(year, month, d);
                             const dateStr = getLocalDateString(date);
-                            const daySales = mechanicState.salesLog?.history?.[dateStr];
+                            const daySales = activeMechanicData.salesLog?.history?.[dateStr];
                             const isToday = getLocalDateString(new Date()) === dateStr;
                             const isFuture = date > today;
                             const isSelected = selectedDay === dateStr;
@@ -2513,32 +2918,32 @@ export default function App() {
                                 <X size={12} />
                               </button>
                             </div>
-                            {mechanicState.salesLog?.history?.[selectedDay] ? (
+                            {activeMechanicData.salesLog?.history?.[selectedDay] ? (
                               <div className="grid grid-cols-2 gap-3 sm:gap-4">
                                 <div>
                                   <p className="text-[7px] sm:text-[8px] text-zinc-600 uppercase font-bold mb-0.5 sm:mb-1">Vendas Realizadas</p>
-                                  <p className="text-base sm:text-lg font-black text-white italic">{mechanicState.salesLog.history[selectedDay].count}</p>
+                                  <p className="text-base sm:text-lg font-black text-white italic">{activeMechanicData.salesLog.history[selectedDay].count}</p>
                                 </div>
                                 <div>
                                   <p className="text-[7px] sm:text-[8px] text-zinc-600 uppercase font-bold mb-0.5 sm:mb-1">Faturamento</p>
-                                  <p className="text-base sm:text-lg font-black text-red-600 italic">{formatCurrency(mechanicState.salesLog.history[selectedDay].totalValue)}</p>
+                                  <p className="text-base sm:text-lg font-black text-red-600 italic">{formatCurrency(activeMechanicData.salesLog.history[selectedDay].totalValue)}</p>
                                 </div>
                                 <div className="col-span-2 grid grid-cols-4 gap-1 sm:gap-2 pt-2 border-t border-zinc-800/50">
                                   <div className="text-center">
                                     <p className="text-[6px] sm:text-[7px] text-zinc-600 uppercase font-bold">UPG</p>
-                                    <p className="text-[10px] sm:text-xs font-black text-white">{mechanicState.salesLog.history[selectedDay].upgrades}</p>
+                                    <p className="text-[10px] sm:text-xs font-black text-white">{activeMechanicData.salesLog.history[selectedDay].upgrades}</p>
                                   </div>
                                   <div className="text-center">
                                     <p className="text-[6px] sm:text-[7px] text-zinc-600 uppercase font-bold">ITM</p>
-                                    <p className="text-[10px] sm:text-xs font-black text-white">{mechanicState.salesLog.history[selectedDay].items}</p>
+                                    <p className="text-[10px] sm:text-xs font-black text-white">{activeMechanicData.salesLog.history[selectedDay].items}</p>
                                   </div>
                                   <div className="text-center">
                                     <p className="text-[6px] sm:text-[7px] text-zinc-600 uppercase font-bold">AVL</p>
-                                    <p className="text-[10px] sm:text-xs font-black text-white">{mechanicState.salesLog.history[selectedDay].avulsos}</p>
+                                    <p className="text-[10px] sm:text-xs font-black text-white">{activeMechanicData.salesLog.history[selectedDay].avulsos}</p>
                                   </div>
                                   <div className="text-center">
                                     <p className="text-[6px] sm:text-[7px] text-zinc-600 uppercase font-bold">SRV</p>
-                                    <p className="text-[10px] sm:text-xs font-black text-white">{mechanicState.salesLog.history[selectedDay].services}</p>
+                                    <p className="text-[10px] sm:text-xs font-black text-white">{activeMechanicData.salesLog.history[selectedDay].services}</p>
                                   </div>
                                 </div>
                               </div>
@@ -2865,6 +3270,7 @@ export default function App() {
       </AnimatePresence>
     </div>
     </TooltipContext.Provider>
+    </ErrorBoundary>
   );
 }
 

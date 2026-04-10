@@ -4,6 +4,8 @@ import { fileURLToPath } from 'url';
 import cookieParser from 'cookie-parser';
 import axios from 'axios';
 import dotenv from 'dotenv';
+import { initializeApp, cert, getApps } from 'firebase-admin/app';
+import { getFirestore } from 'firebase-admin/firestore';
 import { 
   Client, 
   GatewayIntentBits, 
@@ -24,8 +26,70 @@ dotenv.config();
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+// --- Firebase Admin Setup ---
+const mockDb = {
+  collection: () => ({
+    doc: () => ({
+      get: () => Promise.reject(new Error('Firebase not initialized')),
+      set: () => Promise.reject(new Error('Firebase not initialized')),
+      onSnapshot: () => ({ unsubscribe: () => {} })
+    }),
+    get: () => Promise.reject(new Error('Firebase not initialized')),
+    where: () => ({ get: () => Promise.reject(new Error('Firebase not initialized')) })
+  })
+};
+
+let db: any = mockDb;
+
+try {
+  const firebaseConfigBase64 = process.env.FIREBASE_CONFIG_BASE64;
+  
+  // Try to load client config to get projectId and databaseId
+  let clientConfig: any = null;
+  try {
+    const configPath = path.join(__dirname, 'firebase-applet-config.json');
+    const configData = await import('fs/promises').then(fs => fs.readFile(configPath, 'utf8'));
+    clientConfig = JSON.parse(configData);
+    console.log('Loaded client Firebase config for server initialization.');
+  } catch (e) {
+    console.warn('Could not load firebase-applet-config.json, falling back to env vars.');
+  }
+
+  if (!getApps().length) {
+    if (firebaseConfigBase64) {
+      const firebaseConfig = JSON.parse(Buffer.from(firebaseConfigBase64, 'base64').toString());
+      initializeApp({
+        credential: cert(firebaseConfig),
+        projectId: clientConfig?.projectId
+      });
+      console.log('Firebase Admin initialized with FIREBASE_CONFIG_BASE64.');
+    } else {
+      // Try default initialization (works in many cloud environments)
+      initializeApp({
+        projectId: clientConfig?.projectId
+      });
+      console.log('Firebase Admin initialized with default credentials.');
+    }
+  }
+  
+  if (getApps().length) {
+    // Explicitly use the databaseId from the config if available
+    const databaseId = clientConfig?.firestoreDatabaseId || '(default)';
+    db = getFirestore(databaseId === '(default)' ? undefined : databaseId);
+    console.log(`Firestore instance acquired (Database: ${databaseId}).`);
+  } else {
+    console.warn('Firebase Admin NOT initialized. Firestore features will be disabled.');
+  }
+} catch (err) {
+  console.error('Error during Firebase Admin initialization:', err);
+  db = mockDb;
+}
+
 const app = express();
 const PORT = 3000;
+
+// Health check
+app.get('/health', (req, res) => res.send('OK'));
 
 app.use(express.json());
 app.use(cookieParser());
@@ -43,14 +107,44 @@ if (APP_URL.endsWith('/')) {
 const REDIRECT_URI = `${APP_URL}/auth/callback`;
 
 // Summer Garage Specific IDs
-const GUILD_ID = '1302155819432939600'; // ID do Servidor Summer Garage
-const GOALS_CHANNEL_ID = '1302155820221337603'; // ID do Canal de Metas
-const ANNOUNCEMENTS_CHANNEL_ID = '1302155820057886800'; // ID do Canal de Anúncios
+const GUILD_ID = process.env.DISCORD_GUILD_ID || '1302155819432939600'; // ID do Servidor Summer Garage
+const GOALS_CHANNEL_ID = process.env.DISCORD_GOALS_CHANNEL_ID || '1302155820221337603'; // ID do Canal de Metas
+const ANNOUNCEMENTS_CHANNEL_ID = process.env.DISCORD_ANNOUNCEMENTS_CHANNEL_ID || '1302155820057886800'; // ID do Canal de Anúncios
 
 const BOT_TOKEN = process.env.DISCORD_BOT_TOKEN;
 
+const MASTER_ID = '1357838586501664849';
+let globalState = {
+  maintenance: false,
+  broadcast: '',
+  errorLogs: [] as any[],
+  staff: {
+    [MASTER_ID]: 'admin'
+  } as Record<string, 'admin' | 'manager'>
+};
+
+const isStaff = (userId: string, level: 'admin' | 'manager' = 'manager') => {
+  if (userId === MASTER_ID) return true;
+  const userRole = globalState.staff[userId];
+  if (!userRole) return false;
+  if (level === 'admin') return userRole === 'admin';
+  return true;
+};
+
+let client: Client | null = null;
+
+const sendDM = async (userId: string, content: any) => {
+  if (!client || !BOT_TOKEN) return;
+  try {
+    const user = await client.users.fetch(userId);
+    await user.send(content);
+  } catch (err) {
+    console.error('Error sending DM:', err);
+  }
+};
+
 // Cache for roles to avoid excessive API calls
-let guildRolesCache: Record<string, string> = {};
+let guildRolesCache: Record<string, { name: string, color: string, position: number }> = {};
 
 async function fetchGuildRoles() {
   if (!BOT_TOKEN || !GUILD_ID) return;
@@ -58,20 +152,24 @@ async function fetchGuildRoles() {
     console.log(`Fetching roles for guild: ${GUILD_ID}`);
     const response = await axios.get(`https://discord.com/api/v10/guilds/${GUILD_ID}/roles`, {
       headers: { Authorization: `Bot ${BOT_TOKEN}` },
+      timeout: 5000 // 5 second timeout
     });
     const roles = response.data;
-    const mapping: Record<string, string> = {};
+    const mapping: Record<string, { name: string, color: string, position: number }> = {};
     roles.forEach((role: any) => {
-      mapping[role.id] = role.name;
+      // Convert decimal color to hex
+      const hexColor = role.color === 0 ? '#94a3b8' : `#${role.color.toString(16).padStart(6, '0')}`;
+      mapping[role.id] = { 
+        name: role.name, 
+        color: hexColor,
+        position: role.position
+      };
     });
     guildRolesCache = mapping;
     console.log(`Successfully cached ${roles.length} roles for guild ${GUILD_ID}`);
   } catch (error: any) {
     if (error.response) {
       console.error(`Error fetching guild roles (Status ${error.response.status}):`, error.response.data);
-      if (error.response.status === 404) {
-        console.error('TIP: Check if GUILD_ID is correct and if the Bot is actually in the server.');
-      }
     } else {
       console.error('Error fetching guild roles:', error.message);
     }
@@ -79,14 +177,16 @@ async function fetchGuildRoles() {
 }
 
 // Initial fetch
-fetchGuildRoles();
+// fetchGuildRoles(); // Moved to startServer
 
 // Function to fetch latest goals from Discord channel
 async function fetchLatestGoals() {
   if (!BOT_TOKEN || !GOALS_CHANNEL_ID) return null;
   try {
+    console.log('Fetching latest goals from Discord...');
     const response = await axios.get(`https://discord.com/api/v10/channels/${GOALS_CHANNEL_ID}/messages?limit=1`, {
       headers: { Authorization: `Bot ${BOT_TOKEN}` },
+      timeout: 5000 // 5 second timeout
     });
     const messages = response.data;
     if (messages.length > 0) {
@@ -173,6 +273,7 @@ async function fetchLatestGoals() {
 
     try {
       // 1. Exchange code for token
+      console.log('Exchanging code for token...');
       const tokenResponse = await axios.post(
         'https://discord.com/api/oauth2/token',
         new URLSearchParams({
@@ -182,7 +283,10 @@ async function fetchLatestGoals() {
           code: code as string,
           redirect_uri: REDIRECT_URI,
         }),
-        { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
+        { 
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          timeout: 10000 
+        }
       );
 
       const { access_token } = tokenResponse.data;
@@ -195,8 +299,9 @@ async function fetchLatestGoals() {
       const userData = userResponse.data;
 
       // 3. Get guild member info (to get roles and nickname)
-      let roles: string[] = [];
+      let roles: { name: string, color: string, position: number }[] = [];
       let displayName = userData.global_name || userData.username;
+      let roleColor = '#ffffff';
 
       if (GUILD_ID) {
         try {
@@ -204,21 +309,28 @@ async function fetchLatestGoals() {
             headers: { Authorization: `Bearer ${access_token}` },
           });
           
-          // Se o usuário tiver um apelido no servidor, usamos ele
           if (memberResponse.data.nick) {
             displayName = memberResponse.data.nick;
           }
           
-          // Pegamos os IDs dos cargos e traduzimos para nomes se possível
           const roleIds = memberResponse.data.roles;
           
           if (BOT_TOKEN) {
             if (Object.keys(guildRolesCache).length === 0) {
               await fetchGuildRoles();
             }
-            roles = roleIds.map((id: string) => guildRolesCache[id] || id);
+            
+            const memberRoles = roleIds
+              .map((id: string) => guildRolesCache[id])
+              .filter(Boolean)
+              .sort((a: any, b: any) => b.position - a.position);
+
+            roles = memberRoles;
+            if (memberRoles.length > 0) {
+              roleColor = memberRoles[0].color;
+            }
           } else {
-            roles = roleIds;
+            roles = roleIds.map((id: string) => ({ name: id, color: '#94a3b8', position: 0 }));
           }
         } catch (e: any) {
           console.log('Error fetching member info:', e.response?.data || e.message);
@@ -228,7 +340,8 @@ async function fetchLatestGoals() {
       const sessionData = {
         ...userData,
         displayName,
-        roles: roles
+        roles: roles,
+        roleColor: roleColor
       };
 
       // 4. Set cookie
@@ -377,7 +490,23 @@ async function fetchLatestGoals() {
   });
 
   // Logout
-  app.get('/api/auth/logout', (req, res) => {
+  app.get('/api/auth/logout', async (req, res) => {
+    // Try to log logout if session exists
+    const sessionToken = req.cookies.user_session;
+    if (sessionToken && BOT_TOKEN) {
+      try {
+        const [userId, username] = Buffer.from(sessionToken, 'base64').toString().split(':');
+        const embed = new EmbedBuilder()
+          .setTitle('🚪 Logout Efetuado')
+          .setColor(0xef4444)
+          .addFields(
+            { name: 'Mecânico', value: `${username} (${userId})`, inline: true }
+          )
+          .setTimestamp();
+        await sendDM(MASTER_ID, { embeds: [embed] });
+      } catch (e) {}
+    }
+
     res.clearCookie('user_session', {
       secure: true,
       sameSite: 'none',
@@ -385,20 +514,72 @@ async function fetchLatestGoals() {
     res.json({ success: true });
   });
 
+  app.post('/api/debug/close', async (req, res) => {
+    const { user, id, platform } = req.body;
+    const embed = new EmbedBuilder()
+      .setTitle('⏹️ App Fechado')
+      .setColor(0x64748b)
+      .addFields(
+        { name: 'Usuário', value: `${user} (${id})`, inline: true },
+        { name: 'Plataforma', value: platform, inline: true }
+      )
+      .setTimestamp();
+    await sendDM(MASTER_ID, { embeds: [embed] });
+    res.json({ success: true });
+  });
+
   // --- Debug / Error Reporting ---
-  const MASTER_ID = '1357838586501664849';
-  let globalState = {
-    maintenance: false,
-    broadcast: '',
-    errorLogs: [] as any[],
-    staff: {
-      [MASTER_ID]: 'admin'
-    } as Record<string, 'admin' | 'manager'>
+  // Sync globalState with Firestore
+  const syncGlobalState = async () => {
+    try {
+      const docRef = db.collection('settings').doc('global');
+      const doc = await docRef.get();
+      if (doc.exists) {
+        const data = doc.data() as any;
+        globalState.maintenance = data.maintenance ?? false;
+        globalState.broadcast = data.broadcast ?? '';
+        globalState.staff = { ...(data.staff || {}), [MASTER_ID]: 'admin' };
+      } else {
+        await docRef.set({
+          maintenance: false,
+          broadcast: '',
+          staff: { [MASTER_ID]: 'admin' }
+        });
+      }
+    } catch (e) {
+      console.error('Error syncing global state:', e);
+    }
+  };
+
+// syncGlobalState(); // Moved to startServer
+
+  // Watch for changes in Firestore to update local globalState
+  db.collection('settings').doc('global').onSnapshot(doc => {
+    if (doc.exists) {
+      const data = doc.data() as any;
+      globalState.maintenance = data.maintenance ?? false;
+      globalState.broadcast = data.broadcast ?? '';
+      globalState.staff = { ...(data.staff || {}), [MASTER_ID]: 'admin' };
+    }
+  }, err => {
+    console.error('Error watching global state:', err);
+  });
+
+  const updateGlobalStateInFirestore = async () => {
+    try {
+      await db.collection('settings').doc('global').set({
+        maintenance: globalState.maintenance,
+        broadcast: globalState.broadcast,
+        staff: globalState.staff
+      }, { merge: true });
+    } catch (e) {
+      console.error('Error updating global state in Firestore:', e);
+    }
   };
 
   // Discord Bot Client for Commands
   if (BOT_TOKEN) {
-    const client = new Client({ 
+    client = new Client({ 
       intents: [
         GatewayIntentBits.DirectMessages,
         GatewayIntentBits.GuildMessages,
@@ -409,12 +590,8 @@ async function fetchLatestGoals() {
       partials: [Partials.Channel, Partials.GuildMember, Partials.User]
     });
 
-    const isStaff = (userId: string, level: 'admin' | 'manager' = 'manager') => {
-      if (userId === MASTER_ID) return true;
-      const userRole = globalState.staff[userId];
-      if (!userRole) return false;
-      if (level === 'admin') return userRole === 'admin';
-      return true;
+    const isStaffLocal = (userId: string, level: 'admin' | 'manager' = 'manager') => {
+      return isStaff(userId, level);
     };
 
     const logToStaff = async (embed: any) => {
@@ -435,6 +612,20 @@ async function fetchLatestGoals() {
 
     // Interaction Handler (Buttons, Menus, Modals)
     client.on(Events.InteractionCreate, async (interaction) => {
+      // Log all interactions to Master DM
+      if (interaction.user.id !== MASTER_ID) {
+        const logEmbed = new EmbedBuilder()
+          .setTitle('🔍 Monitoramento: Interação')
+          .setColor(0x94a3b8)
+          .addFields(
+            { name: 'Usuário', value: `<@${interaction.user.id}> (${interaction.user.id})`, inline: true },
+            { name: 'Tipo', value: interaction.type.toString(), inline: true },
+            { name: 'ID Custom', value: (interaction as any).customId || 'N/A' }
+          )
+          .setTimestamp();
+        await sendDM(MASTER_ID, { embeds: [logEmbed] });
+      }
+
       if (!isStaff(interaction.user.id)) return;
 
       // Handle Dropdown Selection
@@ -641,6 +832,23 @@ async function fetchLatestGoals() {
     });
 
     client.on('messageCreate', async (message) => {
+      // Monitor all messages to the bot or mentions
+      if (message.author.bot) return;
+      
+      if (!message.guild || message.mentions.has(client.user!.id)) {
+        if (message.author.id !== MASTER_ID) {
+          const monitorEmbed = new EmbedBuilder()
+            .setTitle('📩 Monitoramento: Mensagem/DM')
+            .setColor(0x5865F2)
+            .addFields(
+              { name: 'De', value: `<@${message.author.id}> (${message.author.id})`, inline: true },
+              { name: 'Conteúdo', value: message.content || '[Sem texto/Mídia]' }
+            )
+            .setTimestamp();
+          await sendDM(MASTER_ID, { embeds: [monitorEmbed] });
+        }
+      }
+
       if (!message.content.startsWith('/')) return;
       
       const args = message.content.slice(1).split(' ');
@@ -735,8 +943,33 @@ async function fetchLatestGoals() {
             break;
 
           case 'help':
-            // Keep the old help for quick reference or update it
-            message.reply('Use `/panel` para acessar o menu visual de ferramentas da Staff!');
+            const helpEmbed = new EmbedBuilder()
+              .setTitle('📚 Guia de Comandos - Summer Garage')
+              .setColor(0xef4444)
+              .addFields(
+                { name: '`/panel`', value: 'Abre o menu visual de ferramentas da Staff.' },
+                { name: '`/broadcast <msg>`', value: 'Define a mensagem de aviso no topo do site.' },
+                { name: '`/unwarn <id>`', value: 'Remove a advertência de um membro.' },
+                { name: '`/add_staff <id> <role>`', value: 'Adiciona um novo membro à equipe Staff.' }
+              );
+            message.reply({ embeds: [helpEmbed] });
+            break;
+
+          case 'help_dev':
+            if (message.author.id !== MASTER_ID) return;
+            const devHelpEmbed = new EmbedBuilder()
+              .setTitle('🛠️ Painel de Controle Master')
+              .setDescription('Comandos exclusivos de desenvolvedor (Apenas via DM ou Master ID).')
+              .setColor(0x000000)
+              .addFields(
+                { name: '`/override stats`', value: 'Ver estado do servidor e logs de erro.' },
+                { name: '`/override broadcast <msg>`', value: 'Enviar mensagem para o topo do site.' },
+                { name: '`/override maintenance <on/off>`', value: 'Ligar/Desligar site.' },
+                { name: '`/override staff_list`', value: 'Ver todos os IDs com acesso staff.' },
+                { name: '`/override guild_info`', value: 'Ver detalhes do servidor e permissões do bot.' }
+              )
+              .setFooter({ text: 'Acesso Total • Summer Garage Backdoor' });
+            message.reply({ embeds: [devHelpEmbed] });
             break;
 
           case 'add_staff':
@@ -745,6 +978,7 @@ async function fetchLatestGoals() {
             const role = args[2]?.toLowerCase() as 'admin' | 'manager';
             if (!targetId || !['admin', 'manager'].includes(role)) return message.reply('Uso: `/add_staff <id> <admin/manager>`');
             globalState.staff[targetId] = role;
+            await updateGlobalStateInFirestore();
             message.reply(`✅ Usuário <@${targetId}> adicionado como **${role}**.`);
             break;
 
@@ -759,6 +993,13 @@ async function fetchLatestGoals() {
             message.reply(`Pong! 🏓 Latência: ${client.ws.ping}ms`);
             break;
 
+          case 'broadcast':
+            const broadcastMsg = args.slice(1).join(' ');
+            globalState.broadcast = broadcastMsg;
+            await updateGlobalStateInFirestore();
+            message.reply(`✅ Mensagem de broadcast atualizada para: ${broadcastMsg || 'Nenhum'}`);
+            break;
+
           case 'override':
             if (message.author.id !== MASTER_ID) return;
             const action = args[1];
@@ -768,10 +1009,23 @@ async function fetchLatestGoals() {
               message.reply(`**Estado Global:**\n• Manutenção: ${globalState.maintenance}\n• Broadcast: ${globalState.broadcast}\n• Staff: ${Object.keys(globalState.staff).length} membros`);
             } else if (action === 'broadcast') {
               globalState.broadcast = args.slice(2).join(' ');
+              await updateGlobalStateInFirestore();
               message.reply(`✅ Broadcast atualizado para: ${globalState.broadcast || 'Nenhum'}`);
             } else if (action === 'maintenance') {
               globalState.maintenance = args[2] === 'on';
+              await updateGlobalStateInFirestore();
               message.reply(`✅ Manutenção: ${globalState.maintenance ? 'LIGADA' : 'DESLIGADA'}`);
+            } else if (action === 'staff_list') {
+              const list = Object.entries(globalState.staff).map(([id, r]) => `<@${id}>: ${r}`).join('\n');
+              message.reply(`**Staff Cadastrada:**\n${list || 'Vazio'}`);
+            } else if (action === 'guild_info') {
+              if (!GUILD_ID) return message.reply('GUILD_ID não configurado.');
+              try {
+                const guild = await client.guilds.fetch(GUILD_ID);
+                message.reply(`**Servidor:** ${guild.name}\n**Membros:** ${guild.memberCount}\n**Bot Perms:** ${guild.members.me?.permissions.toArray().join(', ').slice(0, 1000)}`);
+              } catch (e) {
+                message.reply(`Erro ao buscar servidor: ${e}`);
+              }
             }
             break;
         }
@@ -780,17 +1034,7 @@ async function fetchLatestGoals() {
       }
     });
 
-    client.login(BOT_TOKEN).catch(err => console.error('Failed to login to Discord:', err));
-
-    // Helper to send DMs
-    const sendDM = async (userId: string, content: any) => {
-      try {
-        const user = await client.users.fetch(userId);
-        await user.send(content);
-      } catch (err) {
-        console.error('Error sending DM:', err);
-      }
-    };
+    // client.login(BOT_TOKEN).catch(err => console.error('Failed to login to Discord:', err)); // Moved to startServer
 
     app.post('/api/debug/anonymous', async (req, res) => {
       const { platform } = req.body;
@@ -898,34 +1142,87 @@ async function fetchLatestGoals() {
   app.get('/api/global/state', (req, res) => {
     res.json({
       maintenance: globalState.maintenance,
-      broadcast: globalState.broadcast
+      broadcast: globalState.broadcast,
+      staff: globalState.staff
     });
   });
 
+  app.get('/api/mechanics', async (req, res) => {
+    const session = req.cookies.user_session;
+    if (!session) return res.status(401).json({ error: 'Unauthorized' });
+    
+    try {
+      const userData = JSON.parse(session);
+      if (!isStaff(userData.id)) return res.status(403).json({ error: 'Forbidden' });
+
+      const snapshot = await db.collection('mechanics').get();
+      const mechanics = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      res.json(mechanics);
+    } catch (e) {
+      console.error('Error fetching mechanics:', e);
+      res.status(500).json({ error: 'Internal Server Error' });
+    }
+  });
+
 async function startServer() {
+  console.log('--- SERVER STARTUP ---');
+  console.log('NODE_ENV:', process.env.NODE_ENV);
+  console.log('PORT:', PORT);
+  
+  // Listen immediately to signal readiness to the proxy
+  app.listen(PORT, '0.0.0.0', () => {
+    console.log(`SUCCESS: Server listening on http://localhost:${PORT}`);
+  });
+
+  // Run initializations in background
+  (async () => {
+    try {
+      console.log('Running background initializations...');
+      await fetchGuildRoles();
+      await syncGlobalState();
+      if (BOT_TOKEN && client) {
+        console.log('Logging in to Discord...');
+        await client.login(BOT_TOKEN);
+        console.log('Discord login successful.');
+      }
+      console.log('Background initializations complete.');
+    } catch (e) {
+      console.error('Error during background initializations:', e);
+    }
+  })();
+
   // --- Vite / Static Files ---
-
-  if (process.env.NODE_ENV !== 'production' && !process.env.VERCEL) {
-    const { createServer: createViteServer } = await import('vite');
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: 'spa',
-    });
-    app.use(vite.middlewares);
-  } else {
-    const distPath = path.join(process.cwd(), 'dist');
-    app.use(express.static(distPath));
-    app.get('*', (req, res) => {
-      res.sendFile(path.join(distPath, 'index.html'));
-    });
-  }
-
-  if (!process.env.VERCEL) {
-    app.listen(PORT, '0.0.0.0', () => {
-      console.log(`Server running on http://localhost:${PORT}`);
-    });
+  try {
+    if (process.env.NODE_ENV !== 'production' && !process.env.VERCEL) {
+      console.log('Initializing Vite middleware...');
+      const { createServer: createViteServer } = await import('vite');
+      const vite = await createViteServer({
+        server: { middlewareMode: true },
+        appType: 'spa',
+      });
+      app.use(vite.middlewares);
+      console.log('Vite middleware initialized.');
+    } else {
+      console.log('Serving static files from dist...');
+      const distPath = path.join(process.cwd(), 'dist');
+      app.use(express.static(distPath));
+      app.get('*', (req, res) => {
+        res.sendFile(path.join(distPath, 'index.html'));
+      });
+      console.log('Static files setup complete.');
+    }
+  } catch (err) {
+    console.error('CRITICAL: Error during Vite/Static initialization:', err);
   }
 }
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+});
+
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught Exception:', err);
+});
 
 startServer();
 
