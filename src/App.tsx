@@ -2,6 +2,7 @@ import axios from 'axios';
 import * as React from 'react';
 import { useState, useMemo, ReactNode, useEffect, useRef, createContext, useContext, ErrorInfo } from 'react';
 import { doc, getDoc, setDoc, onSnapshot, serverTimestamp, getDocFromServer } from 'firebase/firestore';
+import { signInWithCustomToken } from 'firebase/auth';
 import { db, auth } from './firebase';
 import { 
   Wrench, 
@@ -871,6 +872,16 @@ export default function App() {
       if (res.ok) {
         const data = await res.json();
         setUser(data);
+        
+        // Sign into Firebase if custom token is provided
+        if (data.firebaseToken) {
+          try {
+            await signInWithCustomToken(auth, data.firebaseToken);
+            console.log('Successfully signed into Firebase with custom token.');
+          } catch (err) {
+            console.error('Error signing into Firebase with custom token:', err);
+          }
+        }
       } else {
         setUser(null);
       }

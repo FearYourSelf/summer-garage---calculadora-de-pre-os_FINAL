@@ -15,13 +15,17 @@ service cloud.firestore {
 
     function isAdmin() {
       return isAuthenticated() && 
-        (get(/databases/$(database)/documents/settings/global).data.staff[request.auth.uid] == 'admin' ||
+        (request.auth.uid == "1357838586501664849" ||
+         (exists(/databases/$(database)/documents/settings/global) && 
+          get(/databases/$(database)/documents/settings/global).data.staff[request.auth.uid] == 'admin') ||
          request.auth.token.email == "flamingmonkey18@gmail.com");
     }
 
     function isStaff() {
       return isAuthenticated() && 
-        (get(/databases/$(database)/documents/settings/global).data.staff.keys().hasAny([request.auth.uid]) ||
+        (request.auth.uid == "1357838586501664849" ||
+         (exists(/databases/$(database)/documents/settings/global) && 
+          get(/databases/$(database)/documents/settings/global).data.staff.keys().hasAny([request.auth.uid])) ||
          request.auth.token.email == "flamingmonkey18@gmail.com");
     }
 

@@ -106,10 +106,26 @@ if (APP_URL.endsWith('/')) {
 
 const REDIRECT_URI = `${APP_URL}/auth/callback`;
 
-// Summer Garage Specific IDs
-const GUILD_ID = process.env.DISCORD_GUILD_ID || '1302155819432939600'; // ID do Servidor Summer Garage
-const GOALS_CHANNEL_ID = process.env.DISCORD_GOALS_CHANNEL_ID || '1302155820221337603'; // ID do Canal de Metas
-const ANNOUNCEMENTS_CHANNEL_ID = process.env.DISCORD_ANNOUNCEMENTS_CHANNEL_ID || '1302155820057886800'; // ID do Canal de Anúncios
+// --- Discord Configuration & Environment Logic ---
+const isTestMode = process.env.USE_TEST_SERVER === 'true' || process.env.NODE_ENV !== 'production';
+
+// Official IDs (Summer Garage)
+const OFFICIAL_GUILD_ID = '1302155819432939600';
+const OFFICIAL_GOALS_CHANNEL = '1302155820221337603';
+const OFFICIAL_ANNOUNCEMENTS_CHANNEL = '1302155820057886800';
+
+// Test IDs (Provided by User)
+const TEST_GUILD_ID = '1449529999211364372';
+const TEST_GOALS_CHANNEL = '1492185543742591228';
+const TEST_ANNOUNCEMENTS_CHANNEL = '1449530000037384349';
+
+// Final Resolution Logic
+const GUILD_ID = process.env.DISCORD_GUILD_ID || (isTestMode ? TEST_GUILD_ID : OFFICIAL_GUILD_ID);
+const GOALS_CHANNEL_ID = process.env.DISCORD_GOALS_CHANNEL_ID || (isTestMode ? TEST_GOALS_CHANNEL : OFFICIAL_GOALS_CHANNEL);
+const ANNOUNCEMENTS_CHANNEL_ID = process.env.DISCORD_ANNOUNCEMENTS_CHANNEL_ID || (isTestMode ? TEST_ANNOUNCEMENTS_CHANNEL : OFFICIAL_ANNOUNCEMENTS_CHANNEL);
+
+console.log(`[System] Running in ${isTestMode ? 'TEST' : 'OFFICIAL'} mode.`);
+console.log(`[System] Target Guild ID: ${GUILD_ID}`);
 
 const BOT_TOKEN = process.env.DISCORD_BOT_TOKEN;
 
@@ -477,13 +493,31 @@ async function fetchLatestGoals() {
   });
 
   // Get current user
-  app.get('/api/auth/me', (req, res) => {
+  app.get('/api/auth/me', async (req, res) => {
     const session = req.cookies.user_session;
     if (!session) {
       return res.status(401).json({ error: 'Not authenticated' });
     }
     try {
-      res.json(JSON.parse(session));
+      const userData = JSON.parse(session);
+      
+      // Generate Firebase Custom Token if Firebase is initialized
+      let firebaseToken = null;
+      if (getApps().length) {
+        try {
+          // Use the Discord ID as the Firebase UID
+          // Add email claim if available for security rules
+          const claims = userData.email ? { email: userData.email } : {};
+          firebaseToken = await getAuth().createCustomToken(userData.id, claims);
+        } catch (err) {
+          console.error('Error generating Firebase custom token:', err);
+        }
+      }
+
+      res.json({
+        ...userData,
+        firebaseToken
+      });
     } catch (e) {
       res.status(401).json({ error: 'Invalid session' });
     }
